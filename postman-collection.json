@@ -1,0 +1,183 @@
+{
+  "info": {
+    "name": "Orkestify Project Management API",
+    "description": "API collection for managing projects in Orkestify",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Create Project",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"My First Project\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8080/api/projects",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects"]
+        }
+      }
+    },
+    {
+      "name": "Update Project",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Updated Project Name\",\n  \"githubUrls\": [\n    \"https://github.com/user/repo1\",\n    \"https://github.com/user/repo2\"\n  ]\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8080/api/projects/{{projectId}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects", "{{projectId}}"]
+        }
+      }
+    },
+    {
+      "name": "Get Project by ID",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "http://localhost:8080/api/projects/{{projectId}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects", "{{projectId}}"]
+        }
+      }
+    },
+    {
+      "name": "Get All Projects",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "http://localhost:8080/api/projects",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects"]
+        }
+      }
+    },
+    {
+      "name": "Get Active Projects",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "http://localhost:8080/api/projects?status=active",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects"],
+          "query": [
+            {
+              "key": "status",
+              "value": "active"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Archived Projects",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "http://localhost:8080/api/projects?status=archived",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects"],
+          "query": [
+            {
+              "key": "status",
+              "value": "archived"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Search Projects",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "http://localhost:8080/api/projects?search=project",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects"],
+          "query": [
+            {
+              "key": "search",
+              "value": "project"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Archive Project",
+      "request": {
+        "method": "PATCH",
+        "url": {
+          "raw": "http://localhost:8080/api/projects/{{projectId}}/archive",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects", "{{projectId}}", "archive"]
+        }
+      }
+    },
+    {
+      "name": "Unarchive Project",
+      "request": {
+        "method": "PATCH",
+        "url": {
+          "raw": "http://localhost:8080/api/projects/{{projectId}}/unarchive",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects", "{{projectId}}", "unarchive"]
+        }
+      }
+    },
+    {
+      "name": "Delete Project",
+      "request": {
+        "method": "DELETE",
+        "url": {
+          "raw": "http://localhost:8080/api/projects/{{projectId}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "projects", "{{projectId}}"]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "projectId",
+      "value": "replace-with-actual-project-id"
+    }
+  ]
+}
