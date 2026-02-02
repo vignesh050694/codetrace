@@ -19,6 +19,7 @@ public class EndpointInfo {
     private String signature;
     private List<MethodCall> calls;
     private List<ExternalCallInfo> externalCalls;
+    private List<KafkaCallInfo> kafkaCalls;
     private RequestBodyInfo requestBody;
     private ResponseTypeInfo response;
 }

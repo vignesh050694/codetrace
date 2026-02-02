@@ -29,6 +29,7 @@ public class ProjectService {
     private final CodeAnalysisService codeAnalysisService;
     private final CodeAnalysisResultRepository codeAnalysisResultRepository;
     private final AsyncExternalCallResolverService asyncExternalCallResolverService;
+    private final KafkaProducerConsumerResolver kafkaProducerConsumerResolver;
 
     public ProjectResponse createProject(CreateProjectRequest request, String username) {
         log.info("Creating new project with name: {} for user: {}", request.getName(), username);
@@ -226,6 +227,7 @@ public class ProjectService {
                             .analyzedAt(analysis.getAnalyzedAt())
                             .applicationInfo(analysis.getApplicationInfo())
                             .controllers(analysis.getControllers())
+                            .kafkaListeners(analysis.getKafkaListeners())
                             .services(analysis.getServices())
                             .repositories(analysis.getRepositories())
                             .configurations(analysis.getConfigurations())
@@ -264,6 +266,7 @@ public class ProjectService {
                         .status("FAILED: " + e.getMessage())
                         .applicationInfo(emptyAppInfo)
                         .controllers(new ArrayList<>())
+                        .kafkaListeners(new ArrayList<>())
                         .services(new ArrayList<>())
                         .repositories(new ArrayList<>())
                         .configurations(new ArrayList<>())
@@ -287,6 +290,10 @@ public class ProjectService {
         // Trigger async resolution of external calls
         log.info("Triggering async external call resolution for project: {}", projectId);
         asyncExternalCallResolverService.resolveProjectExternalCalls(projectId, user.getId());
+
+        // Trigger Kafka producer-consumer resolution
+        log.info("Triggering Kafka producer-consumer resolution for user: {}", user.getId());
+        kafkaProducerConsumerResolver.resolveKafkaProducers(user.getId());
 
         return AnalysisJobResponse.builder()
                 .message(message)

@@ -18,4 +18,5 @@ public class MethodCall {
     private String handlerMethod;
     private List<MethodCall> calls;
     private List<ExternalCallInfo> externalCalls;
+    private List<KafkaCallInfo> kafkaCalls;
 }

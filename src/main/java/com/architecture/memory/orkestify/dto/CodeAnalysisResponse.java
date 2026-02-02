@@ -18,6 +18,7 @@ public class CodeAnalysisResponse {
     private LocalDateTime analyzedAt;
     private ApplicationInfo applicationInfo;
     private List<ControllerInfo> controllers;
+    private List<KafkaListenerInfo> kafkaListeners; // Kafka entry points
     private List<ServiceInfo> services;
     private List<RepositoryInfo> repositories;
     private List<ConfigurationInfo> configurations;

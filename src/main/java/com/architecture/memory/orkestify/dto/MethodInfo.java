@@ -17,4 +17,5 @@ public class MethodInfo {
     private LineRange line;
     private List<MethodCall> calls;
     private List<ExternalCallInfo> externalCalls;
+    private List<KafkaCallInfo> kafkaCalls;
 }

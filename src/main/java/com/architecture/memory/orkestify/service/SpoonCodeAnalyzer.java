@@ -1,26 +1,35 @@
 package com.architecture.memory.orkestify.service;
 
 import com.architecture.memory.orkestify.dto.*;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import spoon.Launcher;
 import spoon.reflect.CtModel;
 import spoon.reflect.code.CtBinaryOperator;
 import spoon.reflect.code.CtExpression;
+import spoon.reflect.code.CtFieldRead;
 import spoon.reflect.code.CtInvocation;
 import spoon.reflect.code.CtLiteral;
 import spoon.reflect.declaration.*;
 import spoon.reflect.reference.CtExecutableReference;
 import spoon.reflect.reference.CtTypeReference;
+import spoon.reflect.reference.CtFieldReference;
 import spoon.reflect.code.BinaryOperatorKind;
 
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
 
+
 @Service
 @Slf4j
+@RequiredArgsConstructor
 public class SpoonCodeAnalyzer {
+
+    private final PropertyResolver propertyResolver;
+    private final KafkaAnalyzer kafkaAnalyzer;
+    private final CodeExtractionHelper extractionHelper;
 
     private static final Set<String> MAPPING_ANNOTATIONS = Set.of(
             "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping", "RequestMapping"
@@ -46,6 +55,10 @@ public class SpoonCodeAnalyzer {
     public List<CodeAnalysisResponse> analyzeCode(Path repositoryPath, String projectId, String repoUrl) {
         log.info("Starting Spoon code analysis for repository: {}", repositoryPath);
 
+        // Load properties from application.yaml/properties
+        Map<String, String> properties = propertyResolver.loadProperties(repositoryPath);
+        log.info("Loaded {} configuration properties", properties.size());
+
         Launcher launcher = new Launcher();
         launcher.addInputResource(repositoryPath.toString());
         launcher.getEnvironment().setNoClasspath(true);
@@ -61,7 +74,7 @@ public class SpoonCodeAnalyzer {
         if (springBootApps.isEmpty()) {
             log.warn("No Spring Boot application found in repository");
             // Return single result for non-Spring Boot project
-            return List.of(createNonSpringBootAnalysis(model, projectId, repoUrl));
+            return List.of(createNonSpringBootAnalysis(model, projectId, repoUrl, properties));
         }
 
         log.info("Found {} Spring Boot application(s) in repository", springBootApps.size());
@@ -71,7 +84,7 @@ public class SpoonCodeAnalyzer {
         // Analyze each Spring Boot application separately
         for (CtType<?> springBootApp : springBootApps) {
             CodeAnalysisResponse response = analyzeSpringBootApplication(
-                    model, springBootApp, projectId, repoUrl, repositoryPath
+                    model, springBootApp, projectId, repoUrl, repositoryPath, properties
             );
             responses.add(response);
         }
@@ -87,27 +100,32 @@ public class SpoonCodeAnalyzer {
     }
 
     private CodeAnalysisResponse analyzeSpringBootApplication(
-            CtModel model, CtType<?> springBootApp, String projectId, String repoUrl, Path repositoryPath) {
+            CtModel model, CtType<?> springBootApp, String projectId, String repoUrl, Path repositoryPath, Map<String, String> properties) {
 
         String appPackage = springBootApp.getPackage().getQualifiedName();
         log.info("Analyzing Spring Boot application: {} in package: {}", springBootApp.getSimpleName(), appPackage);
 
         ApplicationInfo applicationInfo = createApplicationInfo(springBootApp);
 
+        // Build @Value field mapping for this package
+        Map<String, String> valueFieldMapping = buildValueFieldMapping(model, appPackage, properties);
+
         // Extract components that belong to this application (by package)
-        List<ControllerInfo> controllers = extractControllersForPackage(model, appPackage);
-        List<ServiceInfo> services = extractServicesForPackage(model, appPackage);
-        List<RepositoryInfo> repositories = extractRepositoriesForPackage(model, appPackage);
+        List<ControllerInfo> controllers = extractControllersForPackage(model, appPackage, properties, valueFieldMapping);
+        List<KafkaListenerInfo> kafkaListeners = kafkaAnalyzer.extractKafkaListenersForPackage(model, appPackage, properties, valueFieldMapping);
+        List<ServiceInfo> services = extractServicesForPackage(model, appPackage, properties, valueFieldMapping);
+        List<RepositoryInfo> repositories = extractRepositoriesForPackage(model, appPackage, properties, valueFieldMapping);
         List<ConfigurationInfo> configurations = extractConfigurationsForPackage(model, appPackage);
 
-        int totalClasses = controllers.size() + services.size() + repositories.size() + configurations.size();
+        int totalClasses = controllers.size() + kafkaListeners.size() + services.size() + repositories.size() + configurations.size();
         int totalMethods = controllers.stream().mapToInt(c -> c.getEndpoints().size()).sum() +
+                kafkaListeners.stream().mapToInt(k -> k.getListeners().size()).sum() +
                 services.stream().mapToInt(s -> s.getMethods().size()).sum() +
                 repositories.stream().mapToInt(r -> r.getMethods().size()).sum() +
                 configurations.stream().mapToInt(c -> c.getBeans().size()).sum();
 
-        log.info("Analysis completed for {}. Controllers: {}, Services: {}, Repositories: {}, Configurations: {}",
-                springBootApp.getSimpleName(), controllers.size(), services.size(),
+        log.info("Analysis completed for {}. Controllers: {}, KafkaListeners: {}, Services: {}, Repositories: {}, Configurations: {}",
+                springBootApp.getSimpleName(), controllers.size(), kafkaListeners.size(), services.size(),
                 repositories.size(), configurations.size());
 
         return CodeAnalysisResponse.builder()
@@ -116,6 +134,7 @@ public class SpoonCodeAnalyzer {
                 .analyzedAt(java.time.LocalDateTime.now())
                 .applicationInfo(applicationInfo)
                 .controllers(controllers)
+                .kafkaListeners(kafkaListeners)
                 .services(services)
                 .repositories(repositories)
                 .configurations(configurations)
@@ -125,18 +144,22 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    private CodeAnalysisResponse createNonSpringBootAnalysis(CtModel model, String projectId, String repoUrl) {
+    private CodeAnalysisResponse createNonSpringBootAnalysis(CtModel model, String projectId, String repoUrl, Map<String, String> properties) {
         ApplicationInfo applicationInfo = ApplicationInfo.builder()
                 .isSpringBootApplication(false)
                 .build();
 
-        List<ControllerInfo> controllers = extractControllers(model);
-        List<ServiceInfo> services = extractServices(model);
-        List<RepositoryInfo> repositories = extractRepositories(model);
+        Map<String, String> valueFieldMapping = buildValueFieldMapping(model, "", properties);
+
+        List<ControllerInfo> controllers = extractControllers(model, properties, valueFieldMapping);
+        List<KafkaListenerInfo> kafkaListeners = kafkaAnalyzer.extractKafkaListeners(model, properties, valueFieldMapping);
+        List<ServiceInfo> services = extractServices(model, properties, valueFieldMapping);
+        List<RepositoryInfo> repositories = extractRepositories(model, properties, valueFieldMapping);
         List<ConfigurationInfo> configurations = extractConfigurations(model);
 
-        int totalClasses = controllers.size() + services.size() + repositories.size() + configurations.size();
+        int totalClasses = controllers.size() + kafkaListeners.size() + services.size() + repositories.size() + configurations.size();
         int totalMethods = controllers.stream().mapToInt(c -> c.getEndpoints().size()).sum() +
+                kafkaListeners.stream().mapToInt(k -> k.getListeners().size()).sum() +
                 services.stream().mapToInt(s -> s.getMethods().size()).sum() +
                 repositories.stream().mapToInt(r -> r.getMethods().size()).sum() +
                 configurations.stream().mapToInt(c -> c.getBeans().size()).sum();
@@ -147,6 +170,7 @@ public class SpoonCodeAnalyzer {
                 .analyzedAt(java.time.LocalDateTime.now())
                 .applicationInfo(applicationInfo)
                 .controllers(controllers)
+                .kafkaListeners(kafkaListeners)
                 .services(services)
                 .repositories(repositories)
                 .configurations(configurations)
@@ -166,7 +190,55 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    private List<ControllerInfo> extractControllers(CtModel model) {
+    /**
+     * Build a mapping of field variable names to their resolved @Value property values
+     * Example: marksTopic -> "marks-topic"
+     */
+    private Map<String, String> buildValueFieldMapping(CtModel model, String basePackage, Map<String, String> properties) {
+        Map<String, String> fieldMapping = new HashMap<>();
+
+        log.info("Building @Value field mapping for package: {}", basePackage.isEmpty() ? "ALL" : basePackage);
+
+        model.getAllTypes().stream()
+                .filter(CtType::isClass)
+                .filter(type -> basePackage.isEmpty() || belongsToPackage(type, basePackage))
+                .forEach(ctClass -> {
+                    ctClass.getFields().forEach(field -> {
+                        // Check if field has @Value annotation
+                        field.getAnnotations().forEach(annotation -> {
+                            if ("Value".equals(annotation.getAnnotationType().getSimpleName())) {
+                                try {
+                                    Object valueObj = annotation.getValue("value");
+                                    if (valueObj != null) {
+                                        String placeholder = valueObj.toString();
+                                        // Remove quotes if present
+                                        placeholder = placeholder.replaceAll("^\"|\"$", "");
+
+                                        // Resolve the placeholder
+                                        String resolvedValue = propertyResolver.resolveProperty(placeholder, properties);
+
+                                        // Map field name to resolved value
+                                        String fieldName = field.getSimpleName();
+                                        String qualifiedFieldName = ctClass.getQualifiedName() + "." + fieldName;
+
+                                        fieldMapping.put(qualifiedFieldName, resolvedValue);
+                                        log.info("✓ Mapped @Value field: {} = {} -> {}",
+                                                 qualifiedFieldName, placeholder, resolvedValue);
+                                    }
+                                } catch (Exception e) {
+                                    log.warn("✗ Could not resolve @Value for field {}.{}: {}",
+                                             ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
+                                }
+                            }
+                        });
+                    });
+                });
+
+        log.info("Built @Value field mapping with {} entries", fieldMapping.size());
+        return fieldMapping;
+    }
+
+    private List<ControllerInfo> extractControllers(CtModel model, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<ControllerInfo> controllers = new ArrayList<>();
 
         model.getAllTypes().stream()
@@ -177,7 +249,7 @@ public class SpoonCodeAnalyzer {
                             .className(ctClass.getSimpleName())
                             .packageName(ctClass.getPackage().getQualifiedName())
                             .line(createLineRange(ctClass))
-                            .endpoints(extractEndpoints(ctClass))
+                            .endpoints(extractEndpoints(ctClass, properties, valueFieldMapping))
                             .build();
                     controllers.add(controllerInfo);
                 });
@@ -185,7 +257,8 @@ public class SpoonCodeAnalyzer {
         return controllers;
     }
 
-    private List<ControllerInfo> extractControllersForPackage(CtModel model, String basePackage) {
+
+    private List<ControllerInfo> extractControllersForPackage(CtModel model, String basePackage, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<ControllerInfo> controllers = new ArrayList<>();
 
         model.getAllTypes().stream()
@@ -197,7 +270,7 @@ public class SpoonCodeAnalyzer {
                             .className(ctClass.getSimpleName())
                             .packageName(ctClass.getPackage().getQualifiedName())
                             .line(createLineRange(ctClass))
-                            .endpoints(extractEndpoints(ctClass))
+                            .endpoints(extractEndpoints(ctClass, properties, valueFieldMapping))
                             .build();
                     controllers.add(controllerInfo);
                 });
@@ -205,7 +278,7 @@ public class SpoonCodeAnalyzer {
         return controllers;
     }
 
-    private List<ServiceInfo> extractServicesForPackage(CtModel model, String basePackage) {
+    private List<ServiceInfo> extractServicesForPackage(CtModel model, String basePackage, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<ServiceInfo> services = new ArrayList<>();
 
         model.getAllTypes().stream()
@@ -217,7 +290,7 @@ public class SpoonCodeAnalyzer {
                             .className(ctClass.getSimpleName())
                             .packageName(ctClass.getPackage().getQualifiedName())
                             .line(createLineRange(ctClass))
-                            .methods(extractMethods(ctClass))
+                            .methods(extractMethods(ctClass, properties, valueFieldMapping))
                             .build();
                     services.add(serviceInfo);
                 });
@@ -225,7 +298,7 @@ public class SpoonCodeAnalyzer {
         return services;
     }
 
-    private List<RepositoryInfo> extractRepositoriesForPackage(CtModel model, String basePackage) {
+    private List<RepositoryInfo> extractRepositoriesForPackage(CtModel model, String basePackage, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<RepositoryInfo> repositories = new ArrayList<>();
 
         model.getAllTypes().stream()
@@ -244,7 +317,7 @@ public class SpoonCodeAnalyzer {
                             .repositoryType(repositoryType)
                             .extendsClass(extendsClass)
                             .line(createLineRange(ctType))
-                            .methods(extractMethods(ctType))
+                            .methods(extractMethods(ctType, properties, valueFieldMapping))
                             .databaseOperations(dbOps)
                             .build();
                     repositories.add(repoInfo);
@@ -274,12 +347,13 @@ public class SpoonCodeAnalyzer {
         return configurations;
     }
 
+
     private boolean belongsToPackage(CtType<?> ctType, String basePackage) {
         String packageName = ctType.getPackage().getQualifiedName();
         return packageName.startsWith(basePackage);
     }
 
-    private List<EndpointInfo> extractEndpoints(CtType<?> controllerClass) {
+    private List<EndpointInfo> extractEndpoints(CtType<?> controllerClass, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<EndpointInfo> endpoints = new ArrayList<>();
         String basePath = extractBasePath(controllerClass);
 
@@ -290,10 +364,14 @@ public class SpoonCodeAnalyzer {
                     String httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annotationName, "REQUEST");
                     String path = extractPath(annotation, basePath);
 
-                    List<MethodCall> calls = extractMethodCalls(method);
+                    List<MethodCall> calls = extractMethodCalls(method, properties, valueFieldMapping);
                     List<ExternalCallInfo> externalCalls = mergeExternalCalls(
-                            extractExternalCalls(method),
+                            extractExternalCalls(method, properties, valueFieldMapping),
                             collectExternalCallsFromCalls(calls)
+                    );
+                    List<KafkaCallInfo> kafkaCalls = kafkaAnalyzer.mergeKafkaCalls(
+                            kafkaAnalyzer.extractKafkaCalls(method, properties, valueFieldMapping),
+                            extractionHelper.collectKafkaCallsFromCalls(calls)
                     );
 
                     RequestBodyInfo requestBody = extractRequestBodyInfo(method);
@@ -307,6 +385,7 @@ public class SpoonCodeAnalyzer {
                             .signature(method.getSignature())
                             .calls(calls)
                             .externalCalls(externalCalls)
+                            .kafkaCalls(kafkaCalls)
                             .requestBody(requestBody)
                             .response(response)
                             .build();
@@ -318,7 +397,7 @@ public class SpoonCodeAnalyzer {
         return endpoints;
     }
 
-    private List<MethodCall> extractMethodCalls(CtMethod<?> method) {
+    private List<MethodCall> extractMethodCalls(CtMethod<?> method, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<MethodCall> calls = new ArrayList<>();
         Set<String> processedCalls = new HashSet<>();
 
@@ -336,10 +415,12 @@ public class SpoonCodeAnalyzer {
                     processedCalls.add(callKey);
 
                     List<ExternalCallInfo> nestedExternalCalls = new ArrayList<>();
+                    List<KafkaCallInfo> nestedKafkaCalls = new ArrayList<>();
                     try {
                         CtExecutable<?> declaration = execRef.getExecutableDeclaration();
                         if (declaration instanceof CtMethod) {
-                            nestedExternalCalls = extractExternalCalls((CtMethod<?>) declaration);
+                            nestedExternalCalls = extractExternalCalls((CtMethod<?>) declaration, properties, valueFieldMapping);
+                            nestedKafkaCalls = kafkaAnalyzer.extractKafkaCalls((CtMethod<?>) declaration, properties, valueFieldMapping);
                         }
                     } catch (Exception e) {
                         // ignore - declaration may be unavailable
@@ -350,8 +431,9 @@ public class SpoonCodeAnalyzer {
                             .handlerMethod(methodName)
                             .signature(execRef.getSignature())
                             .line(createLineRange(invocation))
-                            .calls(extractNestedCalls(execRef))
+                            .calls(extractNestedCalls(execRef, properties, valueFieldMapping))
                             .externalCalls(nestedExternalCalls)
+                            .kafkaCalls(nestedKafkaCalls)
                             .build();
                     calls.add(methodCall);
                 }
@@ -361,11 +443,11 @@ public class SpoonCodeAnalyzer {
         return calls;
     }
 
-    private List<MethodCall> extractNestedCalls(CtExecutableReference<?> execRef) {
+    private List<MethodCall> extractNestedCalls(CtExecutableReference<?> execRef, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         try {
             CtExecutable<?> declaration = execRef.getExecutableDeclaration();
             if (declaration instanceof CtMethod) {
-                return extractMethodCalls((CtMethod<?>) declaration);
+                return extractMethodCalls((CtMethod<?>) declaration, properties, valueFieldMapping);
             }
         } catch (Exception e) {
             // Declaration not found or error parsing
@@ -374,7 +456,7 @@ public class SpoonCodeAnalyzer {
         return new ArrayList<>();
     }
 
-    private List<ServiceInfo> extractServices(CtModel model) {
+    private List<ServiceInfo> extractServices(CtModel model, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<ServiceInfo> services = new ArrayList<>();
 
         model.getAllTypes().stream()
@@ -385,7 +467,7 @@ public class SpoonCodeAnalyzer {
                             .className(ctClass.getSimpleName())
                             .packageName(ctClass.getPackage().getQualifiedName())
                             .line(createLineRange(ctClass))
-                            .methods(extractMethods(ctClass))
+                            .methods(extractMethods(ctClass, properties, valueFieldMapping))
                             .build();
                     services.add(serviceInfo);
                 });
@@ -393,7 +475,7 @@ public class SpoonCodeAnalyzer {
         return services;
     }
 
-    private List<RepositoryInfo> extractRepositories(CtModel model) {
+    private List<RepositoryInfo> extractRepositories(CtModel model, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<RepositoryInfo> repositories = new ArrayList<>();
 
         model.getAllTypes().stream()
@@ -409,7 +491,7 @@ public class SpoonCodeAnalyzer {
                             .repositoryType(repositoryType)
                             .extendsClass(extendsClass)
                             .line(createLineRange(ctType))
-                            .methods(extractMethods(ctType))
+                            .methods(extractMethods(ctType, properties, valueFieldMapping))
                             .build();
                     repositories.add(repoInfo);
                 });
@@ -417,14 +499,18 @@ public class SpoonCodeAnalyzer {
         return repositories;
     }
 
-    private List<MethodInfo> extractMethods(CtType<?> ctType) {
+    private List<MethodInfo> extractMethods(CtType<?> ctType, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         return ctType.getMethods().stream()
                 .filter(method -> !method.isPrivate())
                 .map(method -> {
-                    List<MethodCall> calls = extractMethodCalls(method);
+                    List<MethodCall> calls = extractMethodCalls(method, properties, valueFieldMapping);
                     List<ExternalCallInfo> externalCalls = mergeExternalCalls(
-                            extractExternalCalls(method),
+                            extractExternalCalls(method, properties, valueFieldMapping),
                             collectExternalCallsFromCalls(calls)
+                    );
+                    List<KafkaCallInfo> kafkaCalls = kafkaAnalyzer.mergeKafkaCalls(
+                            kafkaAnalyzer.extractKafkaCalls(method, properties, valueFieldMapping),
+                            extractionHelper.collectKafkaCallsFromCalls(calls)
                     );
 
                     return MethodInfo.builder()
@@ -433,6 +519,7 @@ public class SpoonCodeAnalyzer {
                             .line(createLineRange(method))
                             .calls(calls)
                             .externalCalls(externalCalls)
+                            .kafkaCalls(kafkaCalls)
                             .build();
                 })
                 .collect(Collectors.toList());
@@ -624,7 +711,7 @@ public class SpoonCodeAnalyzer {
         return beans;
     }
 
-    private List<ExternalCallInfo> extractExternalCalls(CtMethod<?> method) {
+    private List<ExternalCallInfo> extractExternalCalls(CtMethod<?> method, Map<String, String> properties, Map<String, String> valueFieldMapping) {
         List<ExternalCallInfo> externalCalls = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
@@ -642,9 +729,9 @@ public class SpoonCodeAnalyzer {
             ExternalCallInfo info = null;
 
             if (isRestTemplateCall(invocation, declaringType, methodName)) {
-                info = buildRestTemplateCall(invocation, declaringType, methodName);
+                info = buildRestTemplateCall(invocation, declaringType, methodName, properties, valueFieldMapping, method.getDeclaringType());
             } else if (isWebClientCall(invocation, declaringType, methodName)) {
-                info = buildWebClientCall(invocation, declaringType, methodName);
+                info = buildWebClientCall(invocation, declaringType, methodName, properties, valueFieldMapping, method.getDeclaringType());
             } else if (isFeignClientCall(declaringType, feignClients)) {
                 info = buildFeignCall(invocation, execRef, declaringType);
             }
@@ -695,9 +782,10 @@ public class SpoonCodeAnalyzer {
         return feignClients.contains(declaringType);
     }
 
-    private ExternalCallInfo buildRestTemplateCall(CtInvocation<?> invocation, String declaringType, String methodName) {
+    private ExternalCallInfo buildRestTemplateCall(CtInvocation<?> invocation, String declaringType, String methodName,
+                                                    Map<String, String> properties, Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
         String httpMethod = restTemplateHttpMethod(methodName, invocation);
-        String url = extractUrlLiteral(invocation.getArguments());
+        String url = extractUrlLiteral(invocation.getArguments(), properties, valueFieldMapping, declaringClass);
 
         return ExternalCallInfo.builder()
                 .clientType("RestTemplate")
@@ -706,15 +794,17 @@ public class SpoonCodeAnalyzer {
                 .targetClass(declaringType)
                 .targetMethod(methodName)
                 .line(createLineRange(invocation))
+                .resolved(false)
                 .build();
     }
 
-    private ExternalCallInfo buildWebClientCall(CtInvocation<?> invocation, String declaringType, String methodName) {
+    private ExternalCallInfo buildWebClientCall(CtInvocation<?> invocation, String declaringType, String methodName,
+                                                 Map<String, String> properties, Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
         String httpMethod = methodName.toUpperCase(Locale.ROOT);
         if (!WEBCLIENT_HTTP_METHODS.contains(methodName)) {
             httpMethod = "UNKNOWN";
         }
-        String url = extractUrlFromWebClientChain(invocation);
+        String url = extractUrlFromWebClientChain(invocation, properties, valueFieldMapping, declaringClass);
 
         return ExternalCallInfo.builder()
                 .clientType("WebClient")
@@ -723,6 +813,7 @@ public class SpoonCodeAnalyzer {
                 .targetClass(declaringType)
                 .targetMethod(methodName)
                 .line(createLineRange(invocation))
+                .resolved(false)
                 .build();
     }
 
@@ -751,6 +842,7 @@ public class SpoonCodeAnalyzer {
                 .targetClass(declaringType)
                 .targetMethod(execRef.getSimpleName())
                 .line(createLineRange(invocation))
+                .resolved(false)
                 .build();
     }
 
@@ -766,9 +858,10 @@ public class SpoonCodeAnalyzer {
         return "REQUEST";
     }
 
-    private String extractUrlLiteral(List<? extends CtExpression<?>> arguments) {
+    private String extractUrlLiteral(List<? extends CtExpression<?>> arguments, Map<String, String> properties,
+                                      Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
         for (CtExpression<?> arg : arguments) {
-            String extracted = extractStringFromExpression(arg);
+            String extracted = extractStringFromExpression(arg, properties, valueFieldMapping, declaringClass);
             if (extracted != null && !extracted.isBlank()) {
                 return normalizeUrl(extracted);
             }
@@ -776,27 +869,136 @@ public class SpoonCodeAnalyzer {
         return "<dynamic>";
     }
 
-    private String extractStringFromExpression(CtExpression<?> expression) {
+    private String extractStringFromExpression(CtExpression<?> expression, Map<String, String> properties,
+                                                 Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
         if (expression == null) {
             return null;
         }
+
+        // Log what type of expression we're processing
+        log.info("🔍 Extracting string from expression type: {}, value: {}, declaringClass: {}, valueFieldMapping size: {}",
+                  expression.getClass().getSimpleName(),
+                  expression.toString(),
+                  declaringClass != null ? declaringClass.getQualifiedName() : "null",
+                  valueFieldMapping != null ? valueFieldMapping.size() : "NULL");
+
         if (expression instanceof CtLiteral) {
             Object value = ((CtLiteral<?>) expression).getValue();
             if (value instanceof String) {
+                log.info("✓ Found literal string: {}", value);
                 return (String) value;
             }
         }
+
+        // Handle CtFieldRead (field access like marksTopic)
+        if (expression instanceof CtFieldRead) {
+            log.info("🎯 Detected CtFieldRead expression!");
+            CtFieldRead<?> fieldRead = (CtFieldRead<?>) expression;
+
+            try {
+                CtFieldReference<?> fieldRef = fieldRead.getVariable();
+                if (fieldRef != null) {
+                    String fieldName = fieldRef.getSimpleName();
+                    CtTypeReference<?> declaringType = fieldRef.getDeclaringType();
+
+                    if (declaringType != null) {
+                        String fieldClassName = declaringType.getQualifiedName();
+                        String qualifiedFieldName = fieldClassName + "." + fieldName;
+
+                        log.info("🎯 Found CtFieldRead: field={}, declaring class={}, qualified={}",
+                                 fieldName, fieldClassName, qualifiedFieldName);
+                        log.info("🔍 Looking up in valueFieldMapping with {} entries", valueFieldMapping.size());
+
+                        // Try exact match
+                        String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
+                        if (resolvedValue != null && !resolvedValue.startsWith("${")) {
+                            log.info("✅ SUCCESS! Resolved CtFieldRead {} to {}", qualifiedFieldName, resolvedValue);
+                            return resolvedValue;
+                        } else {
+                            log.warn("❌ Failed exact match for: {}, resolved={}", qualifiedFieldName, resolvedValue);
+                        }
+
+                        // Try suffix match
+                        log.info("🔍 Trying suffix match for field: {}", fieldName);
+                        for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
+                            if (entry.getKey().endsWith("." + fieldName)) {
+                                log.info("✅ SUCCESS! Resolved CtFieldRead (by suffix) {} to {}", entry.getKey(), entry.getValue());
+                                return entry.getValue();
+                            }
+                        }
+
+                        log.warn("❌ No suffix match found for field: {}", fieldName);
+                    }
+                }
+            } catch (Exception e) {
+                log.error("❌ Error extracting field from CtFieldRead: {}", e.getMessage(), e);
+            }
+        }
+
         if (expression instanceof CtBinaryOperator) {
             CtBinaryOperator<?> binary = (CtBinaryOperator<?>) expression;
             if (binary.getKind() == BinaryOperatorKind.PLUS) {
-                String left = extractStringFromExpression(binary.getLeftHandOperand());
-                String right = extractStringFromExpression(binary.getRightHandOperand());
+                String left = extractStringFromExpression(binary.getLeftHandOperand(), properties, valueFieldMapping, declaringClass);
+                String right = extractStringFromExpression(binary.getRightHandOperand(), properties, valueFieldMapping, declaringClass);
                 return joinUrlPieces(left, right);
             }
         }
-        // Fallback to partial info when variables are used
+
+        // Try to resolve field references (e.g., userServiceUrl, marksTopic)
         String text = expression.toString();
         if (text != null && !text.isBlank()) {
+            // Check if this is a simple field reference (single identifier without dots)
+            String fieldName = text.trim();
+
+            // Try direct lookup first - field name with declaring class
+            String qualifiedFieldName = declaringClass != null ?
+                    declaringClass.getQualifiedName() + "." + fieldName : fieldName;
+
+            log.debug("Attempting to resolve field reference: {} (qualified: {})", fieldName, qualifiedFieldName);
+
+            // Try to resolve from valueFieldMapping with qualified name
+            String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
+            if (resolvedValue != null && !resolvedValue.startsWith("${")) {
+                log.info("✓ Resolved field reference {} to {}", qualifiedFieldName, resolvedValue);
+                return resolvedValue;
+            }
+
+            // If still a placeholder, try to resolve it
+            if (resolvedValue != null && propertyResolver.hasPlaceholders(resolvedValue)) {
+                String fullyResolved = propertyResolver.resolveProperty(resolvedValue, properties);
+                if (fullyResolved != null && !fullyResolved.startsWith("${")) {
+                    log.info("✓ Fully resolved field reference {} to {}", qualifiedFieldName, fullyResolved);
+                    return fullyResolved;
+                }
+            }
+
+            // Try without the declaring class prefix (for same-class fields)
+            resolvedValue = valueFieldMapping.get(fieldName);
+            if (resolvedValue != null && !resolvedValue.startsWith("${")) {
+                log.info("✓ Resolved field reference (simple name) {} to {}", fieldName, resolvedValue);
+                return resolvedValue;
+            }
+
+            // Final fallback: search for any field ending with this name
+            for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
+                if (entry.getKey().endsWith("." + fieldName)) {
+                    log.info("✓ Resolved field reference (by suffix match) {} to {}", entry.getKey(), entry.getValue());
+                    return entry.getValue();
+                }
+            }
+
+            // Log failure with all available mappings for debugging
+            log.warn("✗ Could not resolve field reference: '{}' (qualified: '{}')", fieldName, qualifiedFieldName);
+            log.warn("   Tried: exact match '{}', simple name '{}', and suffix matches", qualifiedFieldName, fieldName);
+            if (!valueFieldMapping.isEmpty()) {
+                log.warn("   Available @Value field mappings ({} total):", valueFieldMapping.size());
+                valueFieldMapping.forEach((key, value) ->
+                    log.warn("     - {} = {}", key, value)
+                );
+            } else {
+                log.warn("   No @Value field mappings available!");
+            }
+
             return "<dynamic>";
         }
         return null;
@@ -828,13 +1030,14 @@ public class SpoonCodeAnalyzer {
         return url;
     }
 
-    private String extractUrlFromWebClientChain(CtInvocation<?> invocation) {
+    private String extractUrlFromWebClientChain(CtInvocation<?> invocation, Map<String, String> properties,
+                                                 Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
         // Walk invocation target chain to find uri("...") call
         CtExpression<?> target = invocation.getTarget();
         while (target instanceof CtInvocation) {
             CtInvocation<?> targetInvocation = (CtInvocation<?>) target;
             if ("uri".equals(targetInvocation.getExecutable().getSimpleName())) {
-                return extractUrlLiteral(targetInvocation.getArguments());
+                return extractUrlLiteral(targetInvocation.getArguments(), properties, valueFieldMapping, declaringClass);
             }
             target = targetInvocation.getTarget();
         }
@@ -1001,6 +1204,7 @@ public class SpoonCodeAnalyzer {
 
         return ResponseTypeInfo.builder()
                 .statusCode(200)
+                .isCollection(false)
                 .build();
     }
 
@@ -1207,5 +1411,3 @@ public class SpoonCodeAnalyzer {
         return input.replaceAll("([a-z])([A-Z])", "$1_$2").toLowerCase(Locale.ROOT);
     }
 }
-
-

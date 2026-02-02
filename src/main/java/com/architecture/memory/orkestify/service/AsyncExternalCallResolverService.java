@@ -2,6 +2,8 @@ package com.architecture.memory.orkestify.service;
 
 import com.architecture.memory.orkestify.dto.EndpointRegistry;
 import com.architecture.memory.orkestify.dto.ExternalCallInfo;
+import com.architecture.memory.orkestify.dto.KafkaCallInfo;
+import com.architecture.memory.orkestify.dto.KafkaTopicRegistry;
 import com.architecture.memory.orkestify.model.CodeAnalysisResult;
 import com.architecture.memory.orkestify.repository.CodeAnalysisResultRepository;
 import lombok.RequiredArgsConstructor;
@@ -18,6 +20,7 @@ public class AsyncExternalCallResolverService {
 
     private final CodeAnalysisResultRepository codeAnalysisResultRepository;
     private final ExternalCallResolutionService resolutionService;
+    private final KafkaResolutionService kafkaResolutionService;
 
     /**
      * Asynchronously resolve all external calls for a project
@@ -25,7 +28,7 @@ public class AsyncExternalCallResolverService {
     @Async
     public void resolveProjectExternalCalls(String projectId, String userId) {
         try {
-            log.info("Starting async resolution of external calls for project: {}", projectId);
+            log.info("Starting async resolution of external calls and Kafka topics for project: {}", projectId);
 
             // Get all analysis results for project
             List<CodeAnalysisResult> analysisResults =
@@ -42,13 +45,18 @@ public class AsyncExternalCallResolverService {
             List<EndpointRegistry> endpointRegistry = buildEndpointRegistry(analysisResults);
             log.info("Built endpoint registry with {} endpoints", endpointRegistry.size());
 
-            // Resolve external calls for each result
+            // Build Kafka topic registry from all analyzed services
+            List<KafkaTopicRegistry> kafkaTopicRegistry = buildKafkaTopicRegistry(analysisResults);
+            log.info("Built Kafka topic registry with {} topics", kafkaTopicRegistry.size());
+
+            // Resolve external calls and Kafka calls for each result
             for (CodeAnalysisResult result : analysisResults) {
                 resolveExternalCallsForResult(result, endpointRegistry);
+                resolveKafkaCallsForResult(result, kafkaTopicRegistry);
                 codeAnalysisResultRepository.save(result);
             }
 
-            log.info("Completed resolution of external calls for project: {}", projectId);
+            log.info("Completed resolution of external calls and Kafka topics for project: {}", projectId);
 
         } catch (Exception e) {
             log.error("Error resolving external calls for project: {}", projectId, e);
@@ -155,5 +163,125 @@ public class AsyncExternalCallResolverService {
         return path
                 .replaceAll("\\{[^}]+\\}", "[^/]+")  // {id} -> [^/]+
                 .replaceAll("<dynamic>", "[^/]*");    // <dynamic> -> [^/]*
+    }
+
+    /**
+     * Build registry of all Kafka topics from analysis results
+     */
+    private List<KafkaTopicRegistry> buildKafkaTopicRegistry(List<CodeAnalysisResult> analysisResults) {
+        List<KafkaTopicRegistry> registry = new ArrayList<>();
+
+        for (CodeAnalysisResult result : analysisResults) {
+            String serviceName = extractServiceName(result);
+            String appClass = result.getApplicationInfo() != null ?
+                    result.getApplicationInfo().getMainClassName() : "Unknown";
+
+            // Add Kafka calls from controllers
+            if (result.getControllers() != null) {
+                for (var controller : result.getControllers()) {
+                    if (controller.getEndpoints() != null) {
+                        for (var endpoint : controller.getEndpoints()) {
+                            if (endpoint.getKafkaCalls() != null) {
+                                for (var kafkaCall : endpoint.getKafkaCalls()) {
+                                    registry.add(KafkaTopicRegistry.builder()
+                                            .serviceName(serviceName)
+                                            .applicationClass(appClass)
+                                            .direction(kafkaCall.getDirection())
+                                            .topic(kafkaCall.getTopic())
+                                            .className(controller.getClassName())
+                                            .methodName(endpoint.getHandlerMethod())
+                                            .clientType(kafkaCall.getClientType())
+                                            .build());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add Kafka calls from services
+            if (result.getServices() != null) {
+                for (var service : result.getServices()) {
+                    if (service.getMethods() != null) {
+                        for (var method : service.getMethods()) {
+                            if (method.getKafkaCalls() != null) {
+                                for (var kafkaCall : method.getKafkaCalls()) {
+                                    registry.add(KafkaTopicRegistry.builder()
+                                            .serviceName(serviceName)
+                                            .applicationClass(appClass)
+                                            .direction(kafkaCall.getDirection())
+                                            .topic(kafkaCall.getTopic())
+                                            .className(service.getClassName())
+                                            .methodName(method.getMethodName())
+                                            .clientType(kafkaCall.getClientType())
+                                            .build());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return registry;
+    }
+
+    /**
+     * Resolve Kafka calls for a single analysis result
+     */
+    private void resolveKafkaCallsForResult(CodeAnalysisResult result, List<KafkaTopicRegistry> kafkaTopicRegistry) {
+        // Resolve Kafka calls in controllers
+        if (result.getControllers() != null) {
+            for (var controller : result.getControllers()) {
+                if (controller.getEndpoints() != null) {
+                    for (var endpoint : controller.getEndpoints()) {
+                        if (endpoint.getKafkaCalls() != null) {
+                            for (var kafkaCall : endpoint.getKafkaCalls()) {
+                                KafkaCallInfo resolved = kafkaResolutionService.resolveKafkaCall(
+                                        kafkaCall,
+                                        kafkaTopicRegistry
+                                );
+
+                                if (resolved.isResolved()) {
+                                    log.info("Resolved Kafka {} on topic {} -> {}",
+                                            resolved.getDirection(), resolved.getTopic(),
+                                            resolved.getTargetService());
+                                } else {
+                                    log.debug("Could not resolve Kafka {} on topic {}",
+                                            resolved.getDirection(), resolved.getTopic());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve Kafka calls in services
+        if (result.getServices() != null) {
+            for (var service : result.getServices()) {
+                if (service.getMethods() != null) {
+                    for (var method : service.getMethods()) {
+                        if (method.getKafkaCalls() != null) {
+                            for (var kafkaCall : method.getKafkaCalls()) {
+                                KafkaCallInfo resolved = kafkaResolutionService.resolveKafkaCall(
+                                        kafkaCall,
+                                        kafkaTopicRegistry
+                                );
+
+                                if (resolved.isResolved()) {
+                                    log.info("Resolved Kafka {} on topic {} -> {}",
+                                            resolved.getDirection(), resolved.getTopic(),
+                                            resolved.getTargetService());
+                                } else {
+                                    log.debug("Could not resolve Kafka {} on topic {}",
+                                            resolved.getDirection(), resolved.getTopic());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
