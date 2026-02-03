@@ -39,8 +39,10 @@ public class ArchitectureSummaryResponse {
     @NoArgsConstructor
     @AllArgsConstructor
     public static class ApplicationSummary {
+        private String id;
         private String appKey;
         private String mainClassName;
+        private String packageName;
         private String repoUrl;
         private boolean isSpringBoot;
         private int controllersCount;

@@ -24,4 +24,18 @@ public interface ControllerNodeRepository extends Neo4jRepository<ControllerNode
     @Query("MATCH (c:Controller {className: $className, packageName: $packageName, projectId: $projectId}) " +
            "RETURN c")
     Optional<ControllerNode> findByFullyQualifiedName(String projectId, String packageName, String className);
+
+    @Query("MATCH (c:Controller {id: $controllerId}) " +
+           "OPTIONAL MATCH p1 = (c)-[:HAS_ENDPOINT]->(e:Endpoint) " +
+           "OPTIONAL MATCH p2 = (e)-[:CALLS]->(m:Method) " +
+           "OPTIONAL MATCH p3 = (e)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
+           "OPTIONAL MATCH p4 = (e)-[:PRODUCES_TO]->(t:KafkaTopic) " +
+           "RETURN c, " +
+           "collect(DISTINCT nodes(p1)), collect(DISTINCT relationships(p1)), " +
+           "collect(DISTINCT nodes(p2)), collect(DISTINCT relationships(p2)), " +
+           "collect(DISTINCT nodes(p3)), collect(DISTINCT relationships(p3)), " +
+           "collect(DISTINCT nodes(p4)), collect(DISTINCT relationships(p4))")
+    Optional<ControllerNode> findByIdWithFullDetails(String controllerId);
+
+    List<ControllerNode> findByAppKey(String appKey);
 }

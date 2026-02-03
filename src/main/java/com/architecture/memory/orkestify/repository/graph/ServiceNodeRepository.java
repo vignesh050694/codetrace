@@ -28,4 +28,24 @@ public interface ServiceNodeRepository extends Neo4jRepository<ServiceNode, Stri
     @Query("MATCH (s:Service {projectId: $projectId})-[:HAS_METHOD]->(m:Method)-[:CALLS*1..3]->(target:Method) " +
            "RETURN s.className as serviceName, collect(DISTINCT target.className) as dependencies")
     List<Object[]> findServiceDependencies(String projectId);
+
+    @Query("MATCH (s:Service {id: $serviceId}) " +
+           "OPTIONAL MATCH p1 = (s)-[:HAS_METHOD]->(m:Method) " +
+           "OPTIONAL MATCH p2 = (m)-[:CALLS]->(calledMethod:Method) " +
+           "OPTIONAL MATCH p3 = (m)-[:PRODUCES_TO]->(t:KafkaTopic) " +
+           "OPTIONAL MATCH p4 = (m)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
+           "RETURN s, " +
+           "collect(DISTINCT nodes(p1)), collect(DISTINCT relationships(p1)), " +
+           "collect(DISTINCT nodes(p2)), collect(DISTINCT relationships(p2)), " +
+           "collect(DISTINCT nodes(p3)), collect(DISTINCT relationships(p3)), " +
+           "collect(DISTINCT nodes(p4)), collect(DISTINCT relationships(p4))")
+    Optional<ServiceNode> findByIdWithFullDetails(String serviceId);
+
+    @Query("MATCH (caller)-[:CALLS|HAS_METHOD*1..2]->(m:Method)<-[:HAS_METHOD]-(s:Service {id: $serviceId}) " +
+           "WHERE caller:Controller OR caller:Service OR caller:KafkaListener " +
+           "RETURN DISTINCT labels(caller)[0] as callerType, caller.className as callerClass, " +
+           "m.methodName as callerMethod, m.lineStart as lineNumber")
+    List<Object[]> findCallersOfService(String serviceId);
+
+    List<ServiceNode> findByAppKey(String appKey);
 }
