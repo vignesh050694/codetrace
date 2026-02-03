@@ -8,6 +8,7 @@ import com.architecture.memory.orkestify.repository.ProjectRepository;
 import com.architecture.memory.orkestify.repository.UserRepository;
 import com.architecture.memory.orkestify.service.graph.GraphQueryService;
 import com.architecture.memory.orkestify.service.graph.GraphVisualizationService;
+import com.architecture.memory.orkestify.service.graph.HierarchyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -29,6 +30,7 @@ public class GraphController {
 
     private final GraphQueryService graphQueryService;
     private final GraphVisualizationService graphVisualizationService;
+    private final HierarchyService hierarchyService;
     private final ProjectRepository projectRepository;
     private final UserRepository userRepository;
 
@@ -179,6 +181,81 @@ public class GraphController {
         validateProjectAccess(projectId);
 
         GraphVisualizationResponse response = graphVisualizationService.buildDatabaseAccessGraph(projectId);
+        return ResponseEntity.ok(response);
+    }
+
+    // ==================== Hierarchy Drill-Down API ====================
+
+    /**
+     * Level 1: Get list of all applications with summary counts.
+     * Base endpoint for hierarchical exploration.
+     */
+    @GetMapping("/hierarchy/applications")
+    public ResponseEntity<ApplicationListResponse> getHierarchyApplications(@PathVariable String projectId) {
+        log.info("Getting hierarchy applications for project: {}", projectId);
+        validateProjectAccess(projectId);
+
+        ApplicationListResponse response = hierarchyService.getApplications(projectId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Level 2: Get application details with all components.
+     * Shows controllers, services, Kafka producers/consumers, and database tables.
+     */
+    @GetMapping("/hierarchy/applications/{appId}")
+    public ResponseEntity<ApplicationDetailResponse> getHierarchyApplicationDetail(
+            @PathVariable String projectId,
+            @PathVariable String appId) {
+        log.info("Getting hierarchy application detail for project: {}, appId: {}", projectId, appId);
+        validateProjectAccess(projectId);
+
+        ApplicationDetailResponse response = hierarchyService.getApplicationDetail(projectId, appId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Level 3: Get controller details with endpoints and internal flow.
+     * Shows service calls, Kafka produces, and external calls for each endpoint.
+     */
+    @GetMapping("/hierarchy/controllers/{controllerId}")
+    public ResponseEntity<ControllerDetailResponse> getHierarchyControllerDetail(
+            @PathVariable String projectId,
+            @PathVariable String controllerId) {
+        log.info("Getting hierarchy controller detail for project: {}, controllerId: {}", projectId, controllerId);
+        validateProjectAccess(projectId);
+
+        ControllerDetailResponse response = hierarchyService.getControllerDetail(projectId, controllerId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Level 3: Get service details with callers and methods.
+     * Shows who calls this service and what it calls.
+     */
+    @GetMapping("/hierarchy/services/{serviceId}")
+    public ResponseEntity<ServiceDetailResponse> getHierarchyServiceDetail(
+            @PathVariable String projectId,
+            @PathVariable String serviceId) {
+        log.info("Getting hierarchy service detail for project: {}, serviceId: {}", projectId, serviceId);
+        validateProjectAccess(projectId);
+
+        ServiceDetailResponse response = hierarchyService.getServiceDetail(projectId, serviceId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Level 3: Get endpoint internal flow with call tree.
+     * Shows the full call tree, Kafka interactions, external calls, and database access.
+     */
+    @GetMapping("/hierarchy/endpoints/{endpointId}")
+    public ResponseEntity<EndpointFlowResponse> getHierarchyEndpointFlow(
+            @PathVariable String projectId,
+            @PathVariable String endpointId) {
+        log.info("Getting hierarchy endpoint flow for project: {}, endpointId: {}", projectId, endpointId);
+        validateProjectAccess(projectId);
+
+        EndpointFlowResponse response = hierarchyService.getEndpointFlow(projectId, endpointId);
         return ResponseEntity.ok(response);
     }
 

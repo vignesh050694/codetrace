@@ -59,13 +59,23 @@ public class GraphVisualizationService {
      * Build architecture summary for a project.
      */
     public ArchitectureSummaryResponse buildArchitectureSummary(String projectId) {
-        List<ApplicationNode> apps = applicationNodeRepository.findByProjectIdWithRelationships(projectId);
+        List<ApplicationNode> apps = applicationNodeRepository.findByProjectId(projectId);
         List<ControllerNode> controllers = controllerNodeRepository.findByProjectId(projectId);
         List<EndpointNode> endpoints = endpointNodeRepository.findByProjectId(projectId);
         List<ServiceNode> services = serviceNodeRepository.findByProjectId(projectId);
-        List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectId(projectId);
+        List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
         List<KafkaTopicNode> topics = kafkaTopicNodeRepository.findByProjectId(projectId);
         List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectId(projectId);
+
+        // Count database tables from repositories
+        long databaseTablesCount = repositories.stream()
+                .filter(r -> r.getAccessesTable() != null)
+                .count();
+
+        // Count configurations - get from apps
+        long configurationsCount = apps.stream()
+                .mapToLong(app -> app.getConfigurations() != null ? app.getConfigurations().size() : 0)
+                .sum();
 
         // Count endpoints by HTTP method
         Map<String, Long> endpointsByMethod = endpoints.stream()
@@ -77,19 +87,29 @@ public class GraphVisualizationService {
                 .filter(r -> r.getRepositoryType() != null)
                 .collect(Collectors.groupingBy(RepositoryClassNode::getRepositoryType, Collectors.counting()));
 
-        // Build application summaries
+        // Build application summaries - count components per app
         List<ArchitectureSummaryResponse.ApplicationSummary> appSummaries = apps.stream()
-                .map(app -> ArchitectureSummaryResponse.ApplicationSummary.builder()
-                        .appKey(app.getAppKey())
-                        .mainClassName(app.getMainClassName())
-                        .repoUrl(app.getRepoUrl())
-                        .isSpringBoot(app.isSpringBoot())
-                        .controllersCount(app.getControllers() != null ? app.getControllers().size() : 0)
-                        .servicesCount(app.getServices() != null ? app.getServices().size() : 0)
-                        .repositoriesCount(app.getRepositories() != null ? app.getRepositories().size() : 0)
-                        .kafkaListenersCount(app.getKafkaListeners() != null ? app.getKafkaListeners().size() : 0)
-                        .configurationsCount(app.getConfigurations() != null ? app.getConfigurations().size() : 0)
-                        .build())
+                .map(app -> {
+                    String appKey = app.getAppKey();
+                    int appControllers = (int) controllers.stream().filter(c -> appKey.equals(c.getAppKey())).count();
+                    int appServices = (int) services.stream().filter(s -> appKey.equals(s.getAppKey())).count();
+                    int appRepositories = (int) repositories.stream().filter(r -> appKey.equals(r.getAppKey())).count();
+                    int appKafkaListeners = (int) listeners.stream().filter(l -> appKey.equals(l.getAppKey())).count();
+
+                    return ArchitectureSummaryResponse.ApplicationSummary.builder()
+                            .id(app.getId())
+                            .appKey(app.getAppKey())
+                            .mainClassName(app.getMainClassName())
+                            .packageName(app.getMainClassPackage())
+                            .repoUrl(app.getRepoUrl())
+                            .isSpringBoot(app.isSpringBoot())
+                            .controllersCount(appControllers)
+                            .servicesCount(appServices)
+                            .repositoriesCount(appRepositories)
+                            .kafkaListenersCount(appKafkaListeners)
+                            .configurationsCount(app.getConfigurations() != null ? app.getConfigurations().size() : 0)
+                            .build();
+                })
                 .collect(Collectors.toList());
 
         return ArchitectureSummaryResponse.builder()
@@ -101,6 +121,8 @@ public class GraphVisualizationService {
                 .totalRepositories(repositories.size())
                 .totalKafkaTopics(topics.size())
                 .totalKafkaListeners(listeners.size())
+                .totalConfigurations((int) configurationsCount)
+                .totalDatabaseTables((int) databaseTablesCount)
                 .endpointsByMethod(endpointsByMethod)
                 .repositoriesByType(repositoriesByType)
                 .applications(appSummaries)
@@ -318,7 +340,7 @@ public class GraphVisualizationService {
         }
 
         // Find consumers (Kafka listeners)
-        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdWithMethods(projectId);
+        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdWithListenerMethods(projectId);
         for (KafkaListenerNode listener : listeners) {
             if (listener.getListenerMethods() != null) {
                 for (KafkaListenerMethodNode method : listener.getListenerMethods()) {

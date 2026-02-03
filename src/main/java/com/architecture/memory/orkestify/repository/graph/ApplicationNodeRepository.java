@@ -23,13 +23,32 @@ public interface ApplicationNodeRepository extends Neo4jRepository<ApplicationNo
     void deleteApplicationGraphByProjectId(String projectId);
 
     @Query("MATCH (a:Application {projectId: $projectId}) " +
-           "OPTIONAL MATCH (a)-[:CONTAINS_CONTROLLER]->(c:Controller) " +
-           "OPTIONAL MATCH (a)-[:CONTAINS_SERVICE]->(s:Service) " +
-           "OPTIONAL MATCH (a)-[:CONTAINS_REPOSITORY]->(r:RepositoryClass) " +
-           "OPTIONAL MATCH (a)-[:CONTAINS_KAFKA_LISTENER]->(k:KafkaListener) " +
-           "RETURN a, collect(DISTINCT c) as controllers, collect(DISTINCT s) as services, " +
-           "collect(DISTINCT r) as repositories, collect(DISTINCT k) as kafkaListeners")
+           "OPTIONAL MATCH p1 = (a)-[:CONTAINS_CONTROLLER]->(c:Controller) " +
+           "OPTIONAL MATCH p2 = (a)-[:CONTAINS_SERVICE]->(s:Service) " +
+           "OPTIONAL MATCH p3 = (a)-[:CONTAINS_REPOSITORY]->(r:RepositoryClass) " +
+           "OPTIONAL MATCH p4 = (a)-[:CONTAINS_KAFKA_LISTENER]->(k:KafkaListener) " +
+           "OPTIONAL MATCH p5 = (a)-[:CONTAINS_CONFIGURATION]->(cfg:Configuration) " +
+           "RETURN a, " +
+           "collect(DISTINCT nodes(p1)) as controllerNodes, collect(DISTINCT relationships(p1)) as controllerRels, " +
+           "collect(DISTINCT nodes(p2)) as serviceNodes, collect(DISTINCT relationships(p2)) as serviceRels, " +
+           "collect(DISTINCT nodes(p3)) as repoNodes, collect(DISTINCT relationships(p3)) as repoRels, " +
+           "collect(DISTINCT nodes(p4)) as kafkaNodes, collect(DISTINCT relationships(p4)) as kafkaRels, " +
+           "collect(DISTINCT nodes(p5)) as configNodes, collect(DISTINCT relationships(p5)) as configRels")
     List<ApplicationNode> findByProjectIdWithRelationships(String projectId);
+
+    @Query("MATCH (a:Application {id: $appId}) " +
+           "OPTIONAL MATCH p1 = (a)-[:CONTAINS_CONTROLLER]->(c:Controller)-[:HAS_ENDPOINT]->(e:Endpoint) " +
+           "OPTIONAL MATCH p2 = (a)-[:CONTAINS_SERVICE]->(s:Service) " +
+           "OPTIONAL MATCH p3 = (a)-[:CONTAINS_REPOSITORY]->(r:RepositoryClass)-[:ACCESSES]->(t:DatabaseTable) " +
+           "OPTIONAL MATCH p4 = (a)-[:CONTAINS_KAFKA_LISTENER]->(k:KafkaListener)-[:HAS_LISTENER_METHOD]->(lm:KafkaListenerMethod) " +
+           "OPTIONAL MATCH p5 = (a)-[:CONTAINS_CONFIGURATION]->(cfg:Configuration) " +
+           "RETURN a, " +
+           "collect(DISTINCT nodes(p1)), collect(DISTINCT relationships(p1)), " +
+           "collect(DISTINCT nodes(p2)), collect(DISTINCT relationships(p2)), " +
+           "collect(DISTINCT nodes(p3)), collect(DISTINCT relationships(p3)), " +
+           "collect(DISTINCT nodes(p4)), collect(DISTINCT relationships(p4)), " +
+           "collect(DISTINCT nodes(p5)), collect(DISTINCT relationships(p5))")
+    ApplicationNode findByIdWithFullRelationships(String appId);
 
     @Query("MATCH (a:Application {appKey: $appKey}) " +
            "OPTIONAL MATCH (a)-[*1..3]->(n) " +
