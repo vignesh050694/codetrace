@@ -34,4 +34,5 @@ github:
   api:
     base-url: https://api.github.com
 
-
+cors:
+  allowed-origins: "http://localhost:3000,https://product2.app"

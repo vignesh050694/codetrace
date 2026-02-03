@@ -618,11 +618,11 @@ public class SpoonCodeAnalyzer {
             int startLine = element.getPosition().getLine();
             int endLine = element.getPosition().getEndLine();
             return LineRange.builder()
-                    .from(startLine)
-                    .to(endLine)
+                    .start(startLine)
+                    .end(endLine)
                     .build();
         } catch (Exception e) {
-            return LineRange.builder().from(0).to(0).build();
+            return LineRange.builder().start(0).end(0).build();
         }
     }
 

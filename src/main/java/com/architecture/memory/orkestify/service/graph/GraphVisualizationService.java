@@ -104,7 +104,9 @@ public class GraphVisualizationService {
                 .endpointsByMethod(endpointsByMethod)
                 .repositoriesByType(repositoriesByType)
                 .applications(appSummaries)
-                .build();
+                .totalConfigurations(0)
+                .totalDatabaseTables(0).
+                build();
     }
 
     /**
@@ -116,7 +118,53 @@ public class GraphVisualizationService {
         Set<String> addedNodeIds = new HashSet<>();
         Set<String> addedEdgeIds = new HashSet<>();
 
-        List<ApplicationNode> apps = applicationNodeRepository.findByProjectIdWithRelationships(projectId);
+        List<ApplicationNode> apps = applicationNodeRepository.findByProjectId(projectId);
+        Map<String, ApplicationNode> appsByKey = apps.stream()
+                .collect(Collectors.toMap(ApplicationNode::getAppKey, app -> app));
+
+        List<ControllerNode> controllers = controllerNodeRepository.findByProjectIdWithEndpoints(projectId);
+        for (ControllerNode controller : controllers) {
+            ApplicationNode app = appsByKey.get(controller.getAppKey());
+            if (app != null) {
+                if (app.getControllers() == null) {
+                    app.setControllers(new HashSet<>());
+                }
+                app.getControllers().add(controller);
+            }
+        }
+
+        List<ServiceNode> services = serviceNodeRepository.findByProjectIdWithMethods(projectId);
+        for (ServiceNode service : services) {
+            ApplicationNode app = appsByKey.get(service.getAppKey());
+            if (app != null) {
+                if (app.getServices() == null) {
+                    app.setServices(new HashSet<>());
+                }
+                app.getServices().add(service);
+            }
+        }
+
+        List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
+        for (RepositoryClassNode repository : repositories) {
+            ApplicationNode app = appsByKey.get(repository.getAppKey());
+            if (app != null) {
+                if (app.getRepositories() == null) {
+                    app.setRepositories(new HashSet<>());
+                }
+                app.getRepositories().add(repository);
+            }
+        }
+
+        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdWithMethods(projectId);
+        for (KafkaListenerNode listener : listeners) {
+            ApplicationNode app = appsByKey.get(listener.getAppKey());
+            if (app != null) {
+                if (app.getKafkaListeners() == null) {
+                    app.setKafkaListeners(new HashSet<>());
+                }
+                app.getKafkaListeners().add(listener);
+            }
+        }
 
         for (ApplicationNode app : apps) {
             // Add application node

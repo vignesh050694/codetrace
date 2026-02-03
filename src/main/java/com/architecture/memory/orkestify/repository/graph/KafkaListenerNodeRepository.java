@@ -25,6 +25,10 @@ public interface KafkaListenerNodeRepository extends Neo4jRepository<KafkaListen
            "RETURN k, collect(m) as listenerMethods")
     List<KafkaListenerNode> findByProjectIdWithListenerMethods(String projectId);
 
+    default List<KafkaListenerNode> findByProjectIdWithMethods(String projectId) {
+        return findByProjectIdWithListenerMethods(projectId);
+    }
+
     @Query("MATCH (k:KafkaListener {projectId: $projectId})-[:HAS_LISTENER_METHOD]->(m:KafkaListenerMethod)-[:CONSUMES_FROM]->(t:KafkaTopic) " +
            "RETURN k, collect(DISTINCT t.name) as consumedTopics")
     List<Object[]> findKafkaListenersWithTopics(String projectId);

@@ -53,7 +53,7 @@ public class GraphPersistenceService {
                     .repositories(new HashSet<>())
                     .kafkaListeners(new HashSet<>())
                     .configurations(new HashSet<>())
-                    .build();
+                    .isSpringBoot(true).build();
         }
 
         // Set application info

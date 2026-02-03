@@ -10,6 +10,6 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class LineRange {
-    private int from;
-    private int to;
+    private int start;
+    private int end;
 }
