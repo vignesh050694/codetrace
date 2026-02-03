@@ -9,6 +9,7 @@ import com.architecture.memory.orkestify.model.User;
 import com.architecture.memory.orkestify.repository.CodeAnalysisResultRepository;
 import com.architecture.memory.orkestify.repository.ProjectRepository;
 import com.architecture.memory.orkestify.repository.UserRepository;
+import com.architecture.memory.orkestify.service.graph.GraphPersistenceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -30,6 +31,7 @@ public class ProjectService {
     private final CodeAnalysisResultRepository codeAnalysisResultRepository;
     private final AsyncExternalCallResolverService asyncExternalCallResolverService;
     private final KafkaProducerConsumerResolver kafkaProducerConsumerResolver;
+    private final GraphPersistenceService graphPersistenceService;
 
     public ProjectResponse createProject(CreateProjectRequest request, String username) {
         log.info("Creating new project with name: {} for user: {}", request.getName(), username);
@@ -237,6 +239,16 @@ public class ProjectService {
                             .createdAt(LocalDateTime.now())
                             .build();
                     upsertAnalysisResult(result);
+
+                    // Persist to Neo4j graph database
+                    try {
+                        graphPersistenceService.persistAnalysis(projectId, user.getId(), repositoryUrl, analysis);
+                        log.info("Persisted analysis to Neo4j graph for app: {}",
+                                buildAppKey(repositoryUrl, analysis.getApplicationInfo()));
+                    } catch (Exception graphEx) {
+                        log.error("Failed to persist analysis to Neo4j graph: {}", graphEx.getMessage(), graphEx);
+                        // Continue processing - MongoDB save was successful
+                    }
 
                     successCount++;
 

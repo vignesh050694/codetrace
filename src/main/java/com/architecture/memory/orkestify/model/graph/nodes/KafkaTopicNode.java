@@ -21,9 +21,12 @@ public class KafkaTopicNode {
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
 
-    @Property("topicName")
-    private String topicName;
+    @Property("name")
+    private String name;
 
     @Property("projectId")
     private String projectId;
+
+    @Property("appKey")
+    private String appKey;
 }

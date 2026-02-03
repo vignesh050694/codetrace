@@ -28,11 +28,14 @@ public class KafkaListenerMethodNode {
     @Property("methodName")
     private String methodName;
 
-    @Property("className")
-    private String className;
+    @Property("listenerClass")
+    private String listenerClass;
 
     @Property("signature")
     private String signature;
+
+    @Property("topic")
+    private String topic;
 
     @Property("groupId")
     private String groupId;
@@ -50,7 +53,8 @@ public class KafkaListenerMethodNode {
     private String appKey;
 
     @Relationship(type = "CONSUMES_FROM", direction = Relationship.Direction.OUTGOING)
-    private KafkaTopicNode consumesTopic;
+    @Builder.Default
+    private Set<KafkaTopicNode> consumesFromTopics = new HashSet<>();
 
     @Relationship(type = "CALLS", direction = Relationship.Direction.OUTGOING)
     @Builder.Default

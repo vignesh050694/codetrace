@@ -43,4 +43,7 @@ public class DatabaseTableNode {
 
     @Property("projectId")
     private String projectId;
+
+    @Property("appKey")
+    private String appKey;
 }
