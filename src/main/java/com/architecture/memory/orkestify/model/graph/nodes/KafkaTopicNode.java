@@ -10,6 +10,9 @@ import org.springframework.data.neo4j.core.schema.Node;
 import org.springframework.data.neo4j.core.schema.Property;
 import org.springframework.data.neo4j.core.support.UUIDStringGenerator;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Node("KafkaTopic")
 @Data
 @Builder
@@ -29,4 +32,24 @@ public class KafkaTopicNode {
 
     @Property("appKey")
     private String appKey;
+
+    // Resolved producer details: "ServiceClass.methodName" for each producer
+    @Property("producerDetails")
+    @Builder.Default
+    private List<String> producerDetails = new ArrayList<>();
+
+    // Resolved consumer details: "ListenerClass.methodName" for each consumer
+    @Property("consumerDetails")
+    @Builder.Default
+    private List<String> consumerDetails = new ArrayList<>();
+
+    // Service class names that produce to this topic
+    @Property("producerServiceNames")
+    @Builder.Default
+    private List<String> producerServiceNames = new ArrayList<>();
+
+    // Service class names that consume from this topic
+    @Property("consumerServiceNames")
+    @Builder.Default
+    private List<String> consumerServiceNames = new ArrayList<>();
 }

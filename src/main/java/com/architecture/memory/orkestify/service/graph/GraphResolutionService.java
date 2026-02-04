@@ -26,6 +26,7 @@ public class GraphResolutionService {
     private final EndpointNodeRepository endpointNodeRepository;
     private final MethodNodeRepository methodNodeRepository;
     private final KafkaTopicNodeRepository kafkaTopicNodeRepository;
+    private final KafkaListenerNodeRepository kafkaListenerNodeRepository;
     private final ApplicationNodeRepository applicationNodeRepository;
 
     private static final Pattern HOST_PATTERN = Pattern.compile("https?://([^:/]+)");
@@ -68,6 +69,22 @@ public class GraphResolutionService {
             }
         }
 
+        // Resolve from Kafka listener methods with external calls
+        List<KafkaListenerNode> listenersWithExternalCalls = kafkaListenerNodeRepository.findByProjectIdWithExternalCalls(projectId);
+        for (KafkaListenerNode listener : listenersWithExternalCalls) {
+            if (listener.getListenerMethods() != null) {
+                for (KafkaListenerMethodNode listenerMethod : listener.getListenerMethods()) {
+                    if (listenerMethod.getExternalCalls() != null) {
+                        for (ExternalCallNode externalCall : listenerMethod.getExternalCalls()) {
+                            if (resolveExternalCall(externalCall, allEndpoints)) {
+                                resolvedCount++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Save resolved nodes
         if (resolvedCount > 0) {
             for (MethodNode method : methodsWithExternalCalls) {
@@ -75,6 +92,9 @@ public class GraphResolutionService {
             }
             for (EndpointNode endpoint : endpointsWithExternalCalls) {
                 endpointNodeRepository.save(endpoint);
+            }
+            for (KafkaListenerNode listener : listenersWithExternalCalls) {
+                kafkaListenerNodeRepository.save(listener);
             }
         }
 
@@ -311,20 +331,101 @@ public class GraphResolutionService {
 
     /**
      * Resolve Kafka producer-consumer connections within a project.
+     * Populates each KafkaTopicNode with producer/consumer service+method details.
      */
     @Transactional
     public void resolveKafkaConnections(String projectId) {
         log.info("Resolving Kafka connections for project: {}", projectId);
 
-        List<KafkaTopicNode> topics = kafkaTopicNodeRepository.findAllByProjectIdWithProducersAndConsumers(projectId);
-
-        int connectionCount = 0;
-        for (KafkaTopicNode topic : topics) {
-            log.debug("Topic: {} has producers and consumers linked in graph", topic.getName());
-            connectionCount++;
+        // Fetch all topics
+        List<KafkaTopicNode> topics = kafkaTopicNodeRepository.findByProjectId(projectId);
+        if (topics.isEmpty()) {
+            log.info("No Kafka topics found for project: {}", projectId);
+            return;
         }
 
-        log.info("Found {} Kafka topics with connections in project: {}", connectionCount, projectId);
+        // Fetch producer details: which service.method produces to each topic
+        List<Map<String, Object>> producerRows = kafkaTopicNodeRepository.findProducerDetailsForProject(projectId);
+        Map<String, List<String>> producerDetailsByTopic = new HashMap<>();
+        Map<String, Set<String>> producerServicesByTopic = new HashMap<>();
+
+        for (Map<String, Object> row : producerRows) {
+            String topicName = (String) row.get("topicName");
+            String className = (String) row.get("className");
+            String methodName = (String) row.get("methodName");
+
+            if (topicName != null && className != null) {
+                String detail = methodName != null ? className + "." + methodName + "()" : className;
+                producerDetailsByTopic.computeIfAbsent(topicName, k -> new ArrayList<>()).add(detail);
+                producerServicesByTopic.computeIfAbsent(topicName, k -> new LinkedHashSet<>()).add(className);
+            }
+        }
+
+        // Fetch consumer details: which listener.method consumes from each topic
+        List<Map<String, Object>> consumerRows = kafkaTopicNodeRepository.findConsumerDetailsForProject(projectId);
+        Map<String, List<String>> consumerDetailsByTopic = new HashMap<>();
+        Map<String, Set<String>> consumerServicesByTopic = new HashMap<>();
+
+        for (Map<String, Object> row : consumerRows) {
+            String topicName = (String) row.get("topicName");
+            String className = (String) row.get("className");
+            String methodName = (String) row.get("methodName");
+            String groupId = (String) row.get("groupId");
+
+            if (topicName != null && className != null) {
+                String detail = methodName != null ? className + "." + methodName + "()" : className;
+                if (groupId != null && !groupId.isEmpty()) {
+                    detail += " [group: " + groupId + "]";
+                }
+                consumerDetailsByTopic.computeIfAbsent(topicName, k -> new ArrayList<>()).add(detail);
+                consumerServicesByTopic.computeIfAbsent(topicName, k -> new LinkedHashSet<>()).add(className);
+            }
+        }
+
+        // Update each topic node with resolved producer/consumer details
+        int resolvedCount = 0;
+        for (KafkaTopicNode topic : topics) {
+            String name = topic.getName();
+            boolean updated = false;
+
+            List<String> producers = producerDetailsByTopic.getOrDefault(name, List.of());
+            if (!producers.isEmpty()) {
+                topic.setProducerDetails(new ArrayList<>(producers));
+                topic.setProducerServiceNames(new ArrayList<>(
+                        producerServicesByTopic.getOrDefault(name, Set.of())));
+                updated = true;
+            }
+
+            List<String> consumers = consumerDetailsByTopic.getOrDefault(name, List.of());
+            if (!consumers.isEmpty()) {
+                topic.setConsumerDetails(new ArrayList<>(consumers));
+                topic.setConsumerServiceNames(new ArrayList<>(
+                        consumerServicesByTopic.getOrDefault(name, Set.of())));
+                updated = true;
+            }
+
+            if (updated) {
+                kafkaTopicNodeRepository.save(topic);
+                resolvedCount++;
+                log.info("Kafka topic '{}': {} producer(s) [{}], {} consumer(s) [{}]",
+                        name, producers.size(),
+                        String.join(", ", topic.getProducerServiceNames()),
+                        consumers.size(),
+                        String.join(", ", topic.getConsumerServiceNames()));
+            }
+        }
+
+        // Log orphan topics
+        List<KafkaTopicNode> orphanProducers = kafkaTopicNodeRepository.findTopicsWithoutConsumers(projectId);
+        for (KafkaTopicNode orphan : orphanProducers) {
+            log.warn("Kafka topic '{}' has producers but no consumers", orphan.getName());
+        }
+        List<KafkaTopicNode> orphanConsumers = kafkaTopicNodeRepository.findTopicsWithoutProducers(projectId);
+        for (KafkaTopicNode orphan : orphanConsumers) {
+            log.warn("Kafka topic '{}' has consumers but no producers", orphan.getName());
+        }
+
+        log.info("Resolved Kafka connections for {} topics in project: {}", resolvedCount, projectId);
     }
 
     /**

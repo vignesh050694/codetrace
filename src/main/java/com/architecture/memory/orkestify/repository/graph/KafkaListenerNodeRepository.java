@@ -32,4 +32,8 @@ public interface KafkaListenerNodeRepository extends Neo4jRepository<KafkaListen
     @Query("MATCH (k:KafkaListener {projectId: $projectId})-[:HAS_LISTENER_METHOD]->(m:KafkaListenerMethod)-[:CONSUMES_FROM]->(t:KafkaTopic) " +
            "RETURN k, collect(DISTINCT t.name) as consumedTopics")
     List<Object[]> findKafkaListenersWithTopics(String projectId);
+
+    @Query("MATCH (k:KafkaListener {projectId: $projectId})-[:HAS_LISTENER_METHOD]->(m:KafkaListenerMethod)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
+           "RETURN k, collect(DISTINCT m) as listenerMethods")
+    List<KafkaListenerNode> findByProjectIdWithExternalCalls(String projectId);
 }

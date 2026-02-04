@@ -6,6 +6,7 @@ import org.springframework.data.neo4j.repository.query.Query;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Repository
@@ -40,4 +41,19 @@ public interface KafkaTopicNodeRepository extends Neo4jRepository<KafkaTopicNode
            "AND t.projectId = $projectId " +
            "RETURN t")
     List<KafkaTopicNode> findTopicsWithoutProducers(String projectId);
+
+    // Producer details: which service.method produces to each topic
+    @Query("MATCH (m)-[:PRODUCES_TO]->(t:KafkaTopic {projectId: $projectId}) " +
+           "WHERE m:Method OR m:KafkaListenerMethod OR m:Endpoint " +
+           "RETURN t.name AS topicName, " +
+           "COALESCE(m.className, m.listenerClass, m.controllerClass) AS className, " +
+           "COALESCE(m.methodName, m.handlerMethod) AS methodName, " +
+           "labels(m)[0] AS nodeType")
+    List<Map<String, Object>> findProducerDetailsForProject(String projectId);
+
+    // Consumer details: which listener.method consumes from each topic
+    @Query("MATCH (m:KafkaListenerMethod)-[:CONSUMES_FROM]->(t:KafkaTopic {projectId: $projectId}) " +
+           "RETURN t.name AS topicName, m.listenerClass AS className, " +
+           "m.methodName AS methodName, m.groupId AS groupId")
+    List<Map<String, Object>> findConsumerDetailsForProject(String projectId);
 }
