@@ -6,22 +6,24 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import spoon.Launcher;
 import spoon.reflect.CtModel;
-import spoon.reflect.code.CtBinaryOperator;
-import spoon.reflect.code.CtExpression;
-import spoon.reflect.code.CtFieldRead;
-import spoon.reflect.code.CtInvocation;
-import spoon.reflect.code.CtLiteral;
+import spoon.reflect.code.*;
 import spoon.reflect.declaration.*;
 import spoon.reflect.reference.CtExecutableReference;
-import spoon.reflect.reference.CtTypeReference;
 import spoon.reflect.reference.CtFieldReference;
-import spoon.reflect.code.BinaryOperatorKind;
+import spoon.reflect.reference.CtTypeReference;
 
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
-
+/**
+ * Code analyzer using Spoon framework.
+ *
+ * Traces the flow: Controller -> Service -> Repository -> Database
+ * Flags: External HTTP calls (RestTemplate, WebClient, Feign)
+ * Flags: Kafka producers/consumers with topic names
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor
@@ -29,7 +31,6 @@ public class SpoonCodeAnalyzer {
 
     private final PropertyResolver propertyResolver;
     private final KafkaAnalyzer kafkaAnalyzer;
-    private final CodeExtractionHelper extractionHelper;
 
     private static final Set<String> MAPPING_ANNOTATIONS = Set.of(
             "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping", "RequestMapping"
@@ -52,127 +53,126 @@ public class SpoonCodeAnalyzer {
             "get", "post", "put", "delete", "patch", "method"
     );
 
-    public List<CodeAnalysisResponse> analyzeCode(Path repositoryPath, String projectId, String repoUrl) {
-        log.info("Starting Spoon code analysis for repository: {}", repositoryPath);
+    /**
+     * Call trace depth from endpoint methods.
+     * depth=1 means: Endpoint -> Service method (and service method's direct calls are captured too)
+     * This gives us: Controller -> Service -> Repository chain
+     */
+    private static final int ENDPOINT_CALL_DEPTH = 1;
 
-        // Load properties from application.yaml/properties
+    /**
+     * Call trace depth from service methods.
+     * depth=0 means: only direct calls (repository calls, external calls, kafka calls)
+     */
+    private static final int SERVICE_CALL_DEPTH = 0;
+
+    // ========================= PUBLIC API =========================
+
+    public List<CodeAnalysisResponse> analyzeCode(Path repositoryPath, String projectId, String repoUrl) {
+        log.info("Starting code analysis for: {}", repositoryPath);
+
         Map<String, String> properties = propertyResolver.loadProperties(repositoryPath);
         log.info("Loaded {} configuration properties", properties.size());
 
+        CtModel model = buildSpoonModel(repositoryPath);
+
+        List<CtType<?>> springBootApps = findSpringBootApplications(model);
+
+        if (springBootApps.isEmpty()) {
+            log.warn("No Spring Boot application found in repository");
+            return List.of(analyzeWithoutSpringBoot(model, projectId, repoUrl, properties));
+        }
+
+        log.info("Found {} Spring Boot application(s)", springBootApps.size());
+
+        return springBootApps.stream()
+                .map(app -> analyzeApplication(model, app, projectId, repoUrl, properties))
+                .collect(Collectors.toList());
+    }
+
+    // ========================= SPOON MODEL =========================
+
+    private CtModel buildSpoonModel(Path repositoryPath) {
         Launcher launcher = new Launcher();
         launcher.addInputResource(repositoryPath.toString());
         launcher.getEnvironment().setNoClasspath(true);
         launcher.getEnvironment().setComplianceLevel(21);
         launcher.getEnvironment().setIgnoreDuplicateDeclarations(true);
         launcher.getEnvironment().setCommentEnabled(false);
-
-        CtModel model = launcher.buildModel();
-
-        // Find all Spring Boot applications in the repository (handles monorepo)
-        List<CtType<?>> springBootApps = findAllSpringBootApplications(model);
-
-        if (springBootApps.isEmpty()) {
-            log.warn("No Spring Boot application found in repository");
-            // Return single result for non-Spring Boot project
-            return List.of(createNonSpringBootAnalysis(model, projectId, repoUrl, properties));
-        }
-
-        log.info("Found {} Spring Boot application(s) in repository", springBootApps.size());
-
-        List<CodeAnalysisResponse> responses = new ArrayList<>();
-
-        // Analyze each Spring Boot application separately
-        for (CtType<?> springBootApp : springBootApps) {
-            CodeAnalysisResponse response = analyzeSpringBootApplication(
-                    model, springBootApp, projectId, repoUrl, repositoryPath, properties
-            );
-            responses.add(response);
-        }
-
-        return responses;
+        return launcher.buildModel();
     }
 
-    private List<CtType<?>> findAllSpringBootApplications(CtModel model) {
+    // ========================= APPLICATION ANALYSIS =========================
+
+    private List<CtType<?>> findSpringBootApplications(CtModel model) {
         return model.getAllTypes().stream()
                 .filter(CtType::isClass)
                 .filter(this::isSpringBootApplication)
                 .collect(Collectors.toList());
     }
 
-    private CodeAnalysisResponse analyzeSpringBootApplication(
-            CtModel model, CtType<?> springBootApp, String projectId, String repoUrl, Path repositoryPath, Map<String, String> properties) {
+    private CodeAnalysisResponse analyzeApplication(CtModel model, CtType<?> app,
+                                                    String projectId, String repoUrl,
+                                                    Map<String, String> properties) {
+        String basePackage = app.getPackage().getQualifiedName();
+        log.info("Analyzing application: {} (package: {})", app.getSimpleName(), basePackage);
 
-        String appPackage = springBootApp.getPackage().getQualifiedName();
-        log.info("Analyzing Spring Boot application: {} in package: {}", springBootApp.getSimpleName(), appPackage);
+        Map<String, String> valueFieldMapping = buildValueFieldMapping(model, basePackage, properties);
 
-        ApplicationInfo applicationInfo = createApplicationInfo(springBootApp);
+        List<ControllerInfo> controllers = extractControllers(model, basePackage, properties, valueFieldMapping);
+        List<ServiceInfo> services = extractServices(model, basePackage, properties, valueFieldMapping);
+        List<RepositoryInfo> repositories = extractRepositories(model, basePackage, properties, valueFieldMapping);
+        List<KafkaListenerInfo> kafkaListeners = kafkaAnalyzer.extractKafkaListenersForPackage(
+                model, basePackage, properties, valueFieldMapping);
+        List<ConfigurationInfo> configurations = extractConfigurations(model, basePackage);
 
-        // Build @Value field mapping for this package
-        Map<String, String> valueFieldMapping = buildValueFieldMapping(model, appPackage, properties);
+        log.info("Analysis complete for {}. Controllers={}, Services={}, Repositories={}, Kafka={}, Config={}",
+                app.getSimpleName(), controllers.size(), services.size(), repositories.size(),
+                kafkaListeners.size(), configurations.size());
 
-        // Extract components that belong to this application (by package)
-        List<ControllerInfo> controllers = extractControllersForPackage(model, appPackage, properties, valueFieldMapping);
-        List<KafkaListenerInfo> kafkaListeners = kafkaAnalyzer.extractKafkaListenersForPackage(model, appPackage, properties, valueFieldMapping);
-        List<ServiceInfo> services = extractServicesForPackage(model, appPackage, properties, valueFieldMapping);
-        List<RepositoryInfo> repositories = extractRepositoriesForPackage(model, appPackage, properties, valueFieldMapping);
-        List<ConfigurationInfo> configurations = extractConfigurationsForPackage(model, appPackage);
-
-        int totalClasses = controllers.size() + kafkaListeners.size() + services.size() + repositories.size() + configurations.size();
-        int totalMethods = controllers.stream().mapToInt(c -> c.getEndpoints().size()).sum() +
-                kafkaListeners.stream().mapToInt(k -> k.getListeners().size()).sum() +
-                services.stream().mapToInt(s -> s.getMethods().size()).sum() +
-                repositories.stream().mapToInt(r -> r.getMethods().size()).sum() +
-                configurations.stream().mapToInt(c -> c.getBeans().size()).sum();
-
-        log.info("Analysis completed for {}. Controllers: {}, KafkaListeners: {}, Services: {}, Repositories: {}, Configurations: {}",
-                springBootApp.getSimpleName(), controllers.size(), kafkaListeners.size(), services.size(),
-                repositories.size(), configurations.size());
-
-        return CodeAnalysisResponse.builder()
-                .projectId(projectId)
-                .repoUrl(repoUrl)
-                .analyzedAt(java.time.LocalDateTime.now())
-                .applicationInfo(applicationInfo)
-                .controllers(controllers)
-                .kafkaListeners(kafkaListeners)
-                .services(services)
-                .repositories(repositories)
-                .configurations(configurations)
-                .totalClasses(totalClasses)
-                .totalMethods(totalMethods)
-                .status("COMPLETED")
-                .build();
+        return buildResponse(projectId, repoUrl, buildApplicationInfo(app),
+                controllers, services, repositories, kafkaListeners, configurations);
     }
 
-    private CodeAnalysisResponse createNonSpringBootAnalysis(CtModel model, String projectId, String repoUrl, Map<String, String> properties) {
-        ApplicationInfo applicationInfo = ApplicationInfo.builder()
-                .isSpringBootApplication(false)
-                .build();
-
+    private CodeAnalysisResponse analyzeWithoutSpringBoot(CtModel model, String projectId,
+                                                          String repoUrl, Map<String, String> properties) {
         Map<String, String> valueFieldMapping = buildValueFieldMapping(model, "", properties);
 
-        List<ControllerInfo> controllers = extractControllers(model, properties, valueFieldMapping);
-        List<KafkaListenerInfo> kafkaListeners = kafkaAnalyzer.extractKafkaListeners(model, properties, valueFieldMapping);
-        List<ServiceInfo> services = extractServices(model, properties, valueFieldMapping);
-        List<RepositoryInfo> repositories = extractRepositories(model, properties, valueFieldMapping);
-        List<ConfigurationInfo> configurations = extractConfigurations(model);
+        List<ControllerInfo> controllers = extractControllers(model, "", properties, valueFieldMapping);
+        List<ServiceInfo> services = extractServices(model, "", properties, valueFieldMapping);
+        List<RepositoryInfo> repositories = extractRepositories(model, "", properties, valueFieldMapping);
+        List<KafkaListenerInfo> kafkaListeners = kafkaAnalyzer.extractKafkaListeners(
+                model, properties, valueFieldMapping);
+        List<ConfigurationInfo> configurations = extractConfigurations(model, "");
 
-        int totalClasses = controllers.size() + kafkaListeners.size() + services.size() + repositories.size() + configurations.size();
-        int totalMethods = controllers.stream().mapToInt(c -> c.getEndpoints().size()).sum() +
-                kafkaListeners.stream().mapToInt(k -> k.getListeners().size()).sum() +
-                services.stream().mapToInt(s -> s.getMethods().size()).sum() +
-                repositories.stream().mapToInt(r -> r.getMethods().size()).sum() +
-                configurations.stream().mapToInt(c -> c.getBeans().size()).sum();
+        ApplicationInfo appInfo = ApplicationInfo.builder().isSpringBootApplication(false).build();
+
+        return buildResponse(projectId, repoUrl, appInfo,
+                controllers, services, repositories, kafkaListeners, configurations);
+    }
+
+    private CodeAnalysisResponse buildResponse(String projectId, String repoUrl, ApplicationInfo appInfo,
+                                               List<ControllerInfo> controllers, List<ServiceInfo> services,
+                                               List<RepositoryInfo> repositories,
+                                               List<KafkaListenerInfo> kafkaListeners,
+                                               List<ConfigurationInfo> configurations) {
+        int totalClasses = controllers.size() + services.size() + repositories.size()
+                + kafkaListeners.size() + configurations.size();
+        int totalMethods = controllers.stream().mapToInt(c -> c.getEndpoints().size()).sum()
+                + services.stream().mapToInt(s -> s.getMethods().size()).sum()
+                + repositories.stream().mapToInt(r -> r.getMethods().size()).sum()
+                + kafkaListeners.stream().mapToInt(k -> k.getListeners().size()).sum()
+                + configurations.stream().mapToInt(c -> c.getBeans().size()).sum();
 
         return CodeAnalysisResponse.builder()
                 .projectId(projectId)
                 .repoUrl(repoUrl)
-                .analyzedAt(java.time.LocalDateTime.now())
-                .applicationInfo(applicationInfo)
+                .analyzedAt(LocalDateTime.now())
+                .applicationInfo(appInfo)
                 .controllers(controllers)
-                .kafkaListeners(kafkaListeners)
                 .services(services)
                 .repositories(repositories)
+                .kafkaListeners(kafkaListeners)
                 .configurations(configurations)
                 .totalClasses(totalClasses)
                 .totalMethods(totalMethods)
@@ -180,7 +180,7 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    private ApplicationInfo createApplicationInfo(CtType<?> springBootApp) {
+    private ApplicationInfo buildApplicationInfo(CtType<?> springBootApp) {
         return ApplicationInfo.builder()
                 .isSpringBootApplication(true)
                 .mainClassName(springBootApp.getSimpleName())
@@ -190,352 +190,96 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    /**
-     * Build a mapping of field variable names to their resolved values.
-     * Captures both @Value annotated fields and static final String constants.
-     */
-    private Map<String, String> buildValueFieldMapping(CtModel model, String basePackage, Map<String, String> properties) {
-        Map<String, String> fieldMapping = new HashMap<>();
+    // ========================= CONTROLLER EXTRACTION =========================
 
-        log.info("Building field mapping for package: {}", basePackage.isEmpty() ? "ALL" : basePackage);
-
-        model.getAllTypes().stream()
-                .filter(CtType::isClass)
-                .filter(type -> basePackage.isEmpty() || belongsToPackage(type, basePackage))
-                .forEach(ctClass -> {
-                    ctClass.getFields().forEach(field -> {
-                        // Check if field has @Value annotation
-                        field.getAnnotations().forEach(annotation -> {
-                            if ("Value".equals(annotation.getAnnotationType().getSimpleName())) {
-                                try {
-                                    Object valueObj = annotation.getValue("value");
-                                    if (valueObj != null) {
-                                        String placeholder = valueObj.toString();
-                                        placeholder = placeholder.replaceAll("^\"|\"$", "");
-
-                                        String resolvedValue = propertyResolver.resolveProperty(placeholder, properties);
-
-                                        String fieldName = field.getSimpleName();
-                                        String qualifiedFieldName = ctClass.getQualifiedName() + "." + fieldName;
-
-                                        fieldMapping.put(qualifiedFieldName, resolvedValue);
-                                        log.debug("Mapped @Value field: {} = {} -> {}",
-                                                 qualifiedFieldName, placeholder, resolvedValue);
-                                    }
-                                } catch (Exception e) {
-                                    log.warn("Could not resolve @Value for field {}.{}: {}",
-                                             ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
-                                }
-                            }
-                        });
-
-                        // Capture static final String constants (e.g., TOPIC_NAME = "user-events")
-                        try {
-                            if (field.isStatic() && field.isFinal()
-                                    && field.getType() != null
-                                    && "String".equals(field.getType().getSimpleName())) {
-                                CtExpression<?> defaultExpr = field.getDefaultExpression();
-                                if (defaultExpr instanceof CtLiteral) {
-                                    Object literalValue = ((CtLiteral<?>) defaultExpr).getValue();
-                                    if (literalValue instanceof String) {
-                                        String qualifiedFieldName = ctClass.getQualifiedName() + "." + field.getSimpleName();
-                                        String value = (String) literalValue;
-
-                                        if (value.contains("${")) {
-                                            value = propertyResolver.resolveProperty(value, properties);
-                                        }
-
-                                        fieldMapping.put(qualifiedFieldName, value);
-                                        log.debug("Mapped static constant: {} = {}", qualifiedFieldName, value);
-                                    }
-                                }
-                            }
-                        } catch (Exception e) {
-                            log.debug("Could not extract static constant for {}.{}: {}",
-                                    ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
-                        }
-                    });
-                });
-
-        log.info("Built field mapping with {} entries", fieldMapping.size());
-        return fieldMapping;
-    }
-
-    private List<ControllerInfo> extractControllers(CtModel model, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<ControllerInfo> controllers = new ArrayList<>();
-
-        model.getAllTypes().stream()
+    private List<ControllerInfo> extractControllers(CtModel model, String basePackage,
+                                                    Map<String, String> properties,
+                                                    Map<String, String> valueFieldMapping) {
+        return model.getAllTypes().stream()
                 .filter(CtType::isClass)
                 .filter(this::isController)
-                .forEach(ctClass -> {
-                    ControllerInfo controllerInfo = ControllerInfo.builder()
-                            .className(ctClass.getSimpleName())
-                            .packageName(ctClass.getPackage().getQualifiedName())
-                            .line(createLineRange(ctClass))
-                            .endpoints(extractEndpoints(ctClass, properties, valueFieldMapping))
-                            .build();
-                    controllers.add(controllerInfo);
-                });
-
-        return controllers;
+                .filter(t -> matchesPackage(t, basePackage))
+                .map(ctClass -> ControllerInfo.builder()
+                        .className(ctClass.getSimpleName())
+                        .packageName(ctClass.getPackage().getQualifiedName())
+                        .line(createLineRange(ctClass))
+                        .endpoints(extractEndpoints(ctClass, properties, valueFieldMapping))
+                        .build())
+                .collect(Collectors.toList());
     }
 
-
-    private List<ControllerInfo> extractControllersForPackage(CtModel model, String basePackage, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<ControllerInfo> controllers = new ArrayList<>();
-
-        model.getAllTypes().stream()
-                .filter(CtType::isClass)
-                .filter(this::isController)
-                .filter(ctClass -> belongsToPackage(ctClass, basePackage))
-                .forEach(ctClass -> {
-                    ControllerInfo controllerInfo = ControllerInfo.builder()
-                            .className(ctClass.getSimpleName())
-                            .packageName(ctClass.getPackage().getQualifiedName())
-                            .line(createLineRange(ctClass))
-                            .endpoints(extractEndpoints(ctClass, properties, valueFieldMapping))
-                            .build();
-                    controllers.add(controllerInfo);
-                });
-
-        return controllers;
-    }
-
-    private List<ServiceInfo> extractServicesForPackage(CtModel model, String basePackage, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<ServiceInfo> services = new ArrayList<>();
-
-        model.getAllTypes().stream()
-                .filter(CtType::isClass)
-                .filter(this::isService)
-                .filter(ctClass -> belongsToPackage(ctClass, basePackage))
-                .forEach(ctClass -> {
-                    ServiceInfo serviceInfo = ServiceInfo.builder()
-                            .className(ctClass.getSimpleName())
-                            .packageName(ctClass.getPackage().getQualifiedName())
-                            .line(createLineRange(ctClass))
-                            .methods(extractMethods(ctClass, properties, valueFieldMapping))
-                            .build();
-                    services.add(serviceInfo);
-                });
-
-        return services;
-    }
-
-    private List<RepositoryInfo> extractRepositoriesForPackage(CtModel model, String basePackage, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<RepositoryInfo> repositories = new ArrayList<>();
-
-        model.getAllTypes().stream()
-                .filter(type -> type.isInterface() || type.isClass())
-                .filter(this::isRepository)
-                .filter(ctType -> belongsToPackage(ctType, basePackage))
-                .forEach(ctType -> {
-                    String extendsClass = extractExtendsClass(ctType);
-                    String repositoryType = determineRepositoryType(extendsClass);
-
-                    DatabaseOperationInfo dbOps = extractDatabaseOperations(ctType, model, repositoryType);
-
-                    RepositoryInfo repoInfo = RepositoryInfo.builder()
-                            .className(ctType.getSimpleName())
-                            .packageName(ctType.getPackage().getQualifiedName())
-                            .repositoryType(repositoryType)
-                            .extendsClass(extendsClass)
-                            .line(createLineRange(ctType))
-                            .methods(extractMethods(ctType, properties, valueFieldMapping))
-                            .databaseOperations(dbOps)
-                            .build();
-                    repositories.add(repoInfo);
-                });
-
-        return repositories;
-    }
-
-    private List<ConfigurationInfo> extractConfigurationsForPackage(CtModel model, String basePackage) {
-        List<ConfigurationInfo> configurations = new ArrayList<>();
-
-        model.getAllTypes().stream()
-                .filter(CtType::isClass)
-                .filter(this::isConfiguration)
-                .filter(ctClass -> belongsToPackage(ctClass, basePackage))
-                .forEach(ctClass -> {
-                    ConfigurationInfo configInfo = ConfigurationInfo.builder()
-                            .className(ctClass.getSimpleName())
-                            .packageName(ctClass.getPackage().getQualifiedName())
-                            .line(createLineRange(ctClass))
-                            .beans(extractBeans(ctClass))
-                            .build();
-                    configurations.add(configInfo);
-                    log.debug("Found Configuration class: {} for package: {}", ctClass.getQualifiedName(), basePackage);
-                });
-
-        return configurations;
-    }
-
-
-    private boolean belongsToPackage(CtType<?> ctType, String basePackage) {
-        String packageName = ctType.getPackage().getQualifiedName();
-        return packageName.startsWith(basePackage);
-    }
-
-    private List<EndpointInfo> extractEndpoints(CtType<?> controllerClass, Map<String, String> properties, Map<String, String> valueFieldMapping) {
+    private List<EndpointInfo> extractEndpoints(CtType<?> controller,
+                                                Map<String, String> properties,
+                                                Map<String, String> valueFieldMapping) {
         List<EndpointInfo> endpoints = new ArrayList<>();
-        String basePath = extractBasePath(controllerClass);
+        String basePath = extractBasePath(controller);
 
-        controllerClass.getMethods().forEach(method -> {
-            method.getAnnotations().forEach(annotation -> {
-                String annotationName = annotation.getAnnotationType().getSimpleName();
-                if (MAPPING_ANNOTATIONS.contains(annotationName)) {
-                    String httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annotationName, "REQUEST");
-                    String path = extractPath(annotation, basePath);
+        for (CtMethod<?> method : controller.getMethods()) {
+            for (CtAnnotation<?> ann : method.getAnnotations()) {
+                String annName = ann.getAnnotationType().getSimpleName();
+                if (!MAPPING_ANNOTATIONS.contains(annName)) continue;
 
-                    List<MethodCall> calls = extractMethodCalls(method, properties, valueFieldMapping);
-                    List<ExternalCallInfo> externalCalls = mergeExternalCalls(
-                            extractExternalCalls(method, properties, valueFieldMapping),
-                            collectExternalCallsFromCalls(calls)
-                    );
-                    List<KafkaCallInfo> kafkaCalls = kafkaAnalyzer.mergeKafkaCalls(
-                            kafkaAnalyzer.extractKafkaCalls(method, properties, valueFieldMapping),
-                            extractionHelper.collectKafkaCallsFromCalls(calls)
-                    );
+                String httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annName, "REQUEST");
+                String path = extractPath(ann, basePath);
 
-                    RequestBodyInfo requestBody = extractRequestBodyInfo(method);
-                    ResponseTypeInfo response = extractResponseTypeInfo(method, httpMethod);
+                // Trace calls with depth=1: captures service method calls and their internal calls
+                List<MethodCall> calls = extractMethodCalls(method, properties, valueFieldMapping, ENDPOINT_CALL_DEPTH);
+                List<ExternalCallInfo> externalCalls = mergeExternalCalls(
+                        extractExternalCalls(method, properties, valueFieldMapping),
+                        collectExternalCallsFromCalls(calls));
+                List<KafkaCallInfo> kafkaCalls = kafkaAnalyzer.mergeKafkaCalls(
+                        kafkaAnalyzer.extractKafkaCalls(method, properties, valueFieldMapping),
+                        collectKafkaCallsFromCalls(calls));
 
-                    EndpointInfo endpoint = EndpointInfo.builder()
-                            .method(httpMethod)
-                            .path(path)
-                            .handlerMethod(method.getSimpleName())
-                            .line(createLineRange(method))
-                            .signature(method.getSignature())
-                            .calls(calls)
-                            .externalCalls(externalCalls)
-                            .kafkaCalls(kafkaCalls)
-                            .requestBody(requestBody)
-                            .response(response)
-                            .build();
-                    endpoints.add(endpoint);
-                }
-            });
-        });
-
+                endpoints.add(EndpointInfo.builder()
+                        .method(httpMethod)
+                        .path(path)
+                        .handlerMethod(method.getSimpleName())
+                        .line(createLineRange(method))
+                        .signature(method.getSignature())
+                        .calls(calls)
+                        .externalCalls(externalCalls)
+                        .kafkaCalls(kafkaCalls)
+                        .requestBody(extractRequestBody(method))
+                        .response(extractResponseType(method, httpMethod))
+                        .build());
+            }
+        }
         return endpoints;
     }
 
-    private List<MethodCall> extractMethodCalls(CtMethod<?> method, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<MethodCall> calls = new ArrayList<>();
-        Set<String> processedCalls = new HashSet<>();
+    // ========================= SERVICE EXTRACTION =========================
 
-        method.getElements(element -> element instanceof CtInvocation).forEach(element -> {
-            CtInvocation<?> invocation = (CtInvocation<?>) element;
-            CtExecutableReference<?> execRef = invocation.getExecutable();
-
-            if (execRef.getDeclaringType() != null) {
-                String className = execRef.getDeclaringType().getQualifiedName();
-                String methodName = execRef.getSimpleName();
-                String callKey = className + "." + methodName;
-
-                // Avoid duplicate calls, standard libraries, and getters/setters
-                if (!processedCalls.contains(callKey) && !isJavaStandardLibrary(className)
-                        && !isGetterOrSetter(methodName)) {
-                    processedCalls.add(callKey);
-
-                    List<ExternalCallInfo> nestedExternalCalls = new ArrayList<>();
-                    List<KafkaCallInfo> nestedKafkaCalls = new ArrayList<>();
-                    try {
-                        CtExecutable<?> declaration = execRef.getExecutableDeclaration();
-                        if (declaration instanceof CtMethod) {
-                            nestedExternalCalls = extractExternalCalls((CtMethod<?>) declaration, properties, valueFieldMapping);
-                            nestedKafkaCalls = kafkaAnalyzer.extractKafkaCalls((CtMethod<?>) declaration, properties, valueFieldMapping);
-                        }
-                    } catch (Exception e) {
-                        // ignore - declaration may be unavailable
-                    }
-
-                    MethodCall methodCall = MethodCall.builder()
-                            .className(className)
-                            .handlerMethod(methodName)
-                            .signature(execRef.getSignature())
-                            .line(createLineRange(invocation))
-                            .calls(extractNestedCalls(execRef, properties, valueFieldMapping))
-                            .externalCalls(nestedExternalCalls)
-                            .kafkaCalls(nestedKafkaCalls)
-                            .build();
-                    calls.add(methodCall);
-                }
-            }
-        });
-
-        return calls;
-    }
-
-    private List<MethodCall> extractNestedCalls(CtExecutableReference<?> execRef, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        try {
-            CtExecutable<?> declaration = execRef.getExecutableDeclaration();
-            if (declaration instanceof CtMethod) {
-                return extractMethodCalls((CtMethod<?>) declaration, properties, valueFieldMapping);
-            }
-        } catch (Exception e) {
-            // Declaration not found or error parsing
-            log.debug("Could not extract nested calls for: {}", execRef.getSignature());
-        }
-        return new ArrayList<>();
-    }
-
-    private List<ServiceInfo> extractServices(CtModel model, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<ServiceInfo> services = new ArrayList<>();
-
-        model.getAllTypes().stream()
+    private List<ServiceInfo> extractServices(CtModel model, String basePackage,
+                                              Map<String, String> properties,
+                                              Map<String, String> valueFieldMapping) {
+        return model.getAllTypes().stream()
                 .filter(CtType::isClass)
                 .filter(this::isService)
-                .forEach(ctClass -> {
-                    ServiceInfo serviceInfo = ServiceInfo.builder()
-                            .className(ctClass.getSimpleName())
-                            .packageName(ctClass.getPackage().getQualifiedName())
-                            .line(createLineRange(ctClass))
-                            .methods(extractMethods(ctClass, properties, valueFieldMapping))
-                            .build();
-                    services.add(serviceInfo);
-                });
-
-        return services;
+                .filter(t -> matchesPackage(t, basePackage))
+                .map(ctClass -> ServiceInfo.builder()
+                        .className(ctClass.getSimpleName())
+                        .packageName(ctClass.getPackage().getQualifiedName())
+                        .line(createLineRange(ctClass))
+                        .methods(extractMethods(ctClass, properties, valueFieldMapping))
+                        .build())
+                .collect(Collectors.toList());
     }
 
-    private List<RepositoryInfo> extractRepositories(CtModel model, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<RepositoryInfo> repositories = new ArrayList<>();
-
-        model.getAllTypes().stream()
-                .filter(type -> type.isInterface() || type.isClass())
-                .filter(this::isRepository)
-                .forEach(ctType -> {
-                    String extendsClass = extractExtendsClass(ctType);
-                    String repositoryType = determineRepositoryType(extendsClass);
-
-                    RepositoryInfo repoInfo = RepositoryInfo.builder()
-                            .className(ctType.getSimpleName())
-                            .packageName(ctType.getPackage().getQualifiedName())
-                            .repositoryType(repositoryType)
-                            .extendsClass(extendsClass)
-                            .line(createLineRange(ctType))
-                            .methods(extractMethods(ctType, properties, valueFieldMapping))
-                            .build();
-                    repositories.add(repoInfo);
-                });
-
-        return repositories;
-    }
-
-    private List<MethodInfo> extractMethods(CtType<?> ctType, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        return ctType.getMethods().stream()
-                .filter(method -> !method.isPrivate())
+    private List<MethodInfo> extractMethods(CtType<?> clazz,
+                                            Map<String, String> properties,
+                                            Map<String, String> valueFieldMapping) {
+        return clazz.getMethods().stream()
+                .filter(m -> !m.isPrivate())
                 .map(method -> {
-                    List<MethodCall> calls = extractMethodCalls(method, properties, valueFieldMapping);
+                    List<MethodCall> calls = extractMethodCalls(
+                            method, properties, valueFieldMapping, SERVICE_CALL_DEPTH);
                     List<ExternalCallInfo> externalCalls = mergeExternalCalls(
                             extractExternalCalls(method, properties, valueFieldMapping),
-                            collectExternalCallsFromCalls(calls)
-                    );
+                            collectExternalCallsFromCalls(calls));
                     List<KafkaCallInfo> kafkaCalls = kafkaAnalyzer.mergeKafkaCalls(
                             kafkaAnalyzer.extractKafkaCalls(method, properties, valueFieldMapping),
-                            extractionHelper.collectKafkaCallsFromCalls(calls)
-                    );
+                            collectKafkaCallsFromCalls(calls));
 
                     return MethodInfo.builder()
                             .methodName(method.getSimpleName())
@@ -549,261 +293,164 @@ public class SpoonCodeAnalyzer {
                 .collect(Collectors.toList());
     }
 
-    private boolean isController(CtType<?> ctType) {
-        return ctType.getAnnotations().stream()
-                .anyMatch(annotation -> {
-                    String name = annotation.getAnnotationType().getSimpleName();
-                    return name.equals("RestController") || name.equals("Controller");
-                });
-    }
+    // ========================= REPOSITORY EXTRACTION =========================
 
-    private boolean isService(CtType<?> ctType) {
-        return ctType.getAnnotations().stream()
-                .anyMatch(annotation -> annotation.getAnnotationType().getSimpleName().equals("Service"));
-    }
+    private List<RepositoryInfo> extractRepositories(CtModel model, String basePackage,
+                                                     Map<String, String> properties,
+                                                     Map<String, String> valueFieldMapping) {
+        return model.getAllTypes().stream()
+                .filter(t -> t.isInterface() || t.isClass())
+                .filter(this::isRepository)
+                .filter(t -> matchesPackage(t, basePackage))
+                .map(ctType -> {
+                    String extendsClass = extractExtendsClass(ctType);
+                    String repoType = determineRepositoryType(extendsClass);
 
-    private boolean isRepository(CtType<?> ctType) {
-        // Check for @Repository annotation
-        boolean hasAnnotation = ctType.getAnnotations().stream()
-                .anyMatch(annotation -> annotation.getAnnotationType().getSimpleName().equals("Repository"));
-
-        // Check if extends *Repository interface
-        boolean extendsRepository = false;
-        if (ctType.isInterface()) {
-            CtTypeReference<?> superInterface = ctType.getSuperInterfaces().stream()
-                    .filter(si -> si.getSimpleName().endsWith("Repository"))
-                    .findFirst()
-                    .orElse(null);
-            extendsRepository = superInterface != null;
-        }
-
-        return hasAnnotation || extendsRepository;
-    }
-
-    private String extractBasePath(CtType<?> controllerClass) {
-        return controllerClass.getAnnotations().stream()
-                .filter(annotation -> annotation.getAnnotationType().getSimpleName().equals("RequestMapping"))
-                .findFirst()
-                .map(annotation -> {
-                    Object value = annotation.getValues().get("value");
-                    if (value != null) {
-                        String path = value.toString().replaceAll("[\"\\[\\]]", "");
-                        return path.isEmpty() ? "" : path;
-                    }
-                    return "";
+                    return RepositoryInfo.builder()
+                            .className(ctType.getSimpleName())
+                            .packageName(ctType.getPackage().getQualifiedName())
+                            .repositoryType(repoType)
+                            .extendsClass(extendsClass)
+                            .line(createLineRange(ctType))
+                            .methods(extractMethods(ctType, properties, valueFieldMapping))
+                            .databaseOperations(extractDatabaseOperations(ctType, model, repoType))
+                            .build();
                 })
-                .orElse("");
+                .collect(Collectors.toList());
     }
 
-    private String extractPath(CtAnnotation<?> annotation, String basePath) {
-        Object value = annotation.getValues().get("value");
-        if (value == null) {
-            value = annotation.getValues().get("path");
-        }
+    // ========================= CONFIGURATION EXTRACTION =========================
 
-        String path = "";
-        if (value != null) {
-            path = value.toString().replaceAll("[\"\\[\\]]", "");
-        }
-
-        if (basePath.isEmpty()) {
-            return path.isEmpty() ? "/" : path;
-        }
-
-        return basePath + (path.isEmpty() ? "" : path);
-    }
-
-    private String extractExtendsClass(CtType<?> ctType) {
-        if (ctType.isInterface()) {
-            return ctType.getSuperInterfaces().stream()
-                    .map(CtTypeReference::getQualifiedName)
-                    .filter(name -> name.contains("Repository"))
-                    .findFirst()
-                    .orElse("None");
-        }
-        return "None";
-    }
-
-    private String determineRepositoryType(String extendsClass) {
-        if (extendsClass.contains("MongoRepository")) {
-            return "MongoDB";
-        } else if (extendsClass.contains("JpaRepository") || extendsClass.contains("CrudRepository")) {
-            return "JPA";
-        } else if (extendsClass.contains("ReactiveMongoRepository")) {
-            return "Reactive MongoDB";
-        } else if (extendsClass.contains("ReactiveCrudRepository")) {
-            return "Reactive JPA";
-        }
-        return "Custom";
-    }
-
-    private LineRange createLineRange(CtElement element) {
-        try {
-            int startLine = element.getPosition().getLine();
-            int endLine = element.getPosition().getEndLine();
-            return LineRange.builder()
-                    .start(startLine)
-                    .end(endLine)
-                    .build();
-        } catch (Exception e) {
-            return LineRange.builder().start(0).end(0).build();
-        }
-    }
-
-    private boolean isJavaStandardLibrary(String className) {
-        return className.startsWith("java.") ||
-                className.startsWith("javax.") ||
-                className.startsWith("jakarta.") ||
-                className.startsWith("org.springframework.") ||
-                className.startsWith("lombok.");
-    }
-
-    /**
-     * Checks if a method name follows getter/setter/builder/common-object patterns.
-     * These are boilerplate methods that add noise to the call graph.
-     */
-    private boolean isGetterOrSetter(String methodName) {
-        if (methodName == null || methodName.isEmpty()) return false;
-
-        // Standard getter: getName(), getXxx()
-        if (methodName.startsWith("get") && methodName.length() > 3
-                && Character.isUpperCase(methodName.charAt(3))) {
-            return true;
-        }
-
-        // Boolean getter: isActive(), isXxx()
-        if (methodName.startsWith("is") && methodName.length() > 2
-                && Character.isUpperCase(methodName.charAt(2))) {
-            return true;
-        }
-
-        // Setter: setName(), setXxx()
-        if (methodName.startsWith("set") && methodName.length() > 3
-                && Character.isUpperCase(methodName.charAt(3))) {
-            return true;
-        }
-
-        // Builder pattern and common Object methods
-        switch (methodName) {
-            case "builder":
-            case "build":
-            case "toBuilder":
-            case "toString":
-            case "hashCode":
-            case "equals":
-            case "canEqual":
-            case "of":
-            case "valueOf":
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    private ApplicationInfo extractApplicationInfo(CtModel model, Path repositoryPath) {
-        log.info("Extracting Spring Boot application information");
-
-        ApplicationInfo.ApplicationInfoBuilder builder = ApplicationInfo.builder()
-                .isSpringBootApplication(false);
-
-        // Find class with @SpringBootApplication annotation
-        model.getAllTypes().stream()
-                .filter(CtType::isClass)
-                .filter(this::isSpringBootApplication)
-                .findFirst()
-                .ifPresent(mainClass -> {
-                    builder.isSpringBootApplication(true)
-                            .mainClassName(mainClass.getSimpleName())
-                            .mainClassPackage(mainClass.getPackage().getQualifiedName())
-                            .rootPath(mainClass.getPosition().getFile().getAbsolutePath())
-                            .line(createLineRange(mainClass));
-                    log.info("Found Spring Boot Application: {}", mainClass.getQualifiedName());
-                });
-
-        return builder.build();
-    }
-
-    private boolean isSpringBootApplication(CtType<?> ctType) {
-        return ctType.getAnnotations().stream()
-                .anyMatch(annotation -> annotation.getAnnotationType().getSimpleName()
-                        .equals("SpringBootApplication"));
-    }
-
-    private List<ConfigurationInfo> extractConfigurations(CtModel model) {
-        List<ConfigurationInfo> configurations = new ArrayList<>();
-
-        model.getAllTypes().stream()
+    private List<ConfigurationInfo> extractConfigurations(CtModel model, String basePackage) {
+        return model.getAllTypes().stream()
                 .filter(CtType::isClass)
                 .filter(this::isConfiguration)
-                .forEach(ctClass -> {
-                    ConfigurationInfo configInfo = ConfigurationInfo.builder()
-                            .className(ctClass.getSimpleName())
-                            .packageName(ctClass.getPackage().getQualifiedName())
-                            .line(createLineRange(ctClass))
-                            .beans(extractBeans(ctClass))
-                            .build();
-                    configurations.add(configInfo);
-                    log.info("Found Configuration class: {}", ctClass.getQualifiedName());
-                });
-
-        return configurations;
-    }
-
-    private boolean isConfiguration(CtType<?> ctType) {
-        return ctType.getAnnotations().stream()
-                .anyMatch(annotation -> {
-                    String name = annotation.getAnnotationType().getSimpleName();
-                    return name.equals("Configuration") || name.equals("SpringBootApplication");
-                });
+                .filter(t -> matchesPackage(t, basePackage))
+                .map(ctClass -> ConfigurationInfo.builder()
+                        .className(ctClass.getSimpleName())
+                        .packageName(ctClass.getPackage().getQualifiedName())
+                        .line(createLineRange(ctClass))
+                        .beans(extractBeans(ctClass))
+                        .build())
+                .collect(Collectors.toList());
     }
 
     private List<BeanInfo> extractBeans(CtType<?> configClass) {
         List<BeanInfo> beans = new ArrayList<>();
-
-        configClass.getMethods().forEach(method -> {
-            method.getAnnotations().forEach(annotation -> {
-                if (annotation.getAnnotationType().getSimpleName().equals("Bean")) {
-                    BeanInfo bean = BeanInfo.builder()
-                            .beanName(method.getSimpleName())
-                            .returnType(method.getType().getQualifiedName())
-                            .methodName(method.getSimpleName())
-                            .line(createLineRange(method))
-                            .build();
-                    beans.add(bean);
-                }
-            });
-        });
-
+        for (CtMethod<?> method : configClass.getMethods()) {
+            boolean isBean = method.getAnnotations().stream()
+                    .anyMatch(a -> "Bean".equals(a.getAnnotationType().getSimpleName()));
+            if (isBean) {
+                beans.add(BeanInfo.builder()
+                        .beanName(method.getSimpleName())
+                        .returnType(method.getType().getQualifiedName())
+                        .methodName(method.getSimpleName())
+                        .line(createLineRange(method))
+                        .build());
+            }
+        }
         return beans;
     }
 
-    private List<ExternalCallInfo> extractExternalCalls(CtMethod<?> method, Map<String, String> properties, Map<String, String> valueFieldMapping) {
-        List<ExternalCallInfo> externalCalls = new ArrayList<>();
+    // ========================= METHOD CALL EXTRACTION =========================
+
+    /**
+     * Extract method calls from a method body with depth-limited tracing.
+     *
+     * depth=1: Trace one level deep (endpoint -> service methods, including their direct calls)
+     * depth=0: Direct calls only (service -> repository/external calls)
+     *
+     * This gives us the chain: Controller -> Service -> Repository
+     */
+    private List<MethodCall> extractMethodCalls(CtMethod<?> method,
+                                                Map<String, String> properties,
+                                                Map<String, String> valueFieldMapping,
+                                                int depth) {
+        List<MethodCall> calls = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
+        method.getElements(e -> e instanceof CtInvocation).forEach(element -> {
+            CtInvocation<?> invocation = (CtInvocation<?>) element;
+            CtExecutableReference<?> execRef = invocation.getExecutable();
+
+            if (execRef.getDeclaringType() == null) return;
+
+            String className = execRef.getDeclaringType().getQualifiedName();
+            String methodName = execRef.getSimpleName();
+            String key = className + "." + methodName;
+
+            if (seen.contains(key) || isJavaStandardLibrary(className) || isGetterOrSetter(methodName)) return;
+            seen.add(key);
+
+            // Extract nested information if we have depth remaining
+            List<MethodCall> nestedCalls = Collections.emptyList();
+            List<ExternalCallInfo> nestedExtCalls = Collections.emptyList();
+            List<KafkaCallInfo> nestedKafkaCalls = Collections.emptyList();
+
+            if (depth > 0) {
+                try {
+                    CtExecutable<?> decl = execRef.getExecutableDeclaration();
+                    if (decl instanceof CtMethod) {
+                        CtMethod<?> declMethod = (CtMethod<?>) decl;
+                        nestedCalls = extractMethodCalls(declMethod, properties, valueFieldMapping, depth - 1);
+                        nestedExtCalls = extractExternalCalls(declMethod, properties, valueFieldMapping);
+                        nestedKafkaCalls = kafkaAnalyzer.extractKafkaCalls(declMethod, properties, valueFieldMapping);
+                    }
+                } catch (Exception e) {
+                    log.debug("Could not resolve declaration for: {}", key);
+                }
+            }
+
+            calls.add(MethodCall.builder()
+                    .className(className)
+                    .handlerMethod(methodName)
+                    .signature(execRef.getSignature())
+                    .line(createLineRange(invocation))
+                    .calls(nestedCalls)
+                    .externalCalls(nestedExtCalls)
+                    .kafkaCalls(nestedKafkaCalls)
+                    .build());
+        });
+
+        return calls;
+    }
+
+    // ========================= EXTERNAL CALL DETECTION =========================
+
+    /**
+     * Detect external HTTP calls (RestTemplate, WebClient, Feign).
+     * Flags the call with client type, HTTP method, and URL/path.
+     * Resolution of target service happens later.
+     */
+    private List<ExternalCallInfo> extractExternalCalls(CtMethod<?> method,
+                                                        Map<String, String> properties,
+                                                        Map<String, String> valueFieldMapping) {
+        List<ExternalCallInfo> externalCalls = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
         Set<String> feignClients = findFeignClientTypes(method.getFactory().getModel());
 
-        method.getElements(element -> element instanceof CtInvocation).forEach(element -> {
+        method.getElements(e -> e instanceof CtInvocation).forEach(element -> {
             CtInvocation<?> invocation = (CtInvocation<?>) element;
             CtExecutableReference<?> execRef = invocation.getExecutable();
 
             String declaringType = execRef.getDeclaringType() != null
-                    ? execRef.getDeclaringType().getQualifiedName()
-                    : "";
+                    ? execRef.getDeclaringType().getQualifiedName() : "";
             String methodName = execRef.getSimpleName();
 
             ExternalCallInfo info = null;
 
             if (isRestTemplateCall(invocation, declaringType, methodName)) {
-                info = buildRestTemplateCall(invocation, declaringType, methodName, properties, valueFieldMapping, method.getDeclaringType());
+                info = buildRestTemplateCall(invocation, declaringType, methodName,
+                        properties, valueFieldMapping, method.getDeclaringType());
             } else if (isWebClientCall(invocation, declaringType, methodName)) {
-                info = buildWebClientCall(invocation, declaringType, methodName, properties, valueFieldMapping, method.getDeclaringType());
+                info = buildWebClientCall(invocation, declaringType, methodName,
+                        properties, valueFieldMapping, method.getDeclaringType());
             } else if (isFeignClientCall(declaringType, feignClients)) {
                 info = buildFeignCall(invocation, execRef, declaringType);
             }
 
             if (info != null) {
-                String key = info.getClientType() + ":" + info.getTargetClass() + ":" + info.getTargetMethod() + ":" + info.getUrl();
+                String key = info.getClientType() + ":" + info.getUrl() + ":" + info.getHttpMethod();
                 if (seen.add(key)) {
                     externalCalls.add(info);
                 }
@@ -814,20 +461,20 @@ public class SpoonCodeAnalyzer {
     }
 
     private boolean isRestTemplateCall(CtInvocation<?> invocation, String declaringType, String methodName) {
-        if (declaringType.endsWith("RestTemplate") && REST_TEMPLATE_METHODS.contains(methodName)) {
-            return true;
-        }
+        if (!REST_TEMPLATE_METHODS.contains(methodName)) return false;
+
+        if (declaringType.endsWith("RestTemplate")) return true;
+
         CtExpression<?> target = invocation.getTarget();
         if (target != null && target.getType() != null) {
             String typeName = target.getType().getQualifiedName();
-            if (typeName.endsWith("RestTemplate") && REST_TEMPLATE_METHODS.contains(methodName)) {
-                return true;
-            }
+            if (typeName.endsWith("RestTemplate")) return true;
         }
-        // Fallback when no classpath: look at target variable name
+
+        // Fallback: check variable name
         if (target != null) {
             String targetText = target.toString().toLowerCase(Locale.ROOT);
-            return targetText.contains("resttemplate") && REST_TEMPLATE_METHODS.contains(methodName);
+            return targetText.contains("resttemplate");
         }
         return false;
     }
@@ -838,8 +485,9 @@ public class SpoonCodeAnalyzer {
         }
         CtExpression<?> target = invocation.getTarget();
         if (target != null && target.getType() != null) {
-            return target.getType().getQualifiedName().endsWith("WebClient") ||
-                    (target.getType().getQualifiedName().contains("WebClient") && WEBCLIENT_HTTP_METHODS.contains(methodName));
+            String typeName = target.getType().getQualifiedName();
+            return typeName.endsWith("WebClient")
+                    || (typeName.contains("WebClient") && WEBCLIENT_HTTP_METHODS.contains(methodName));
         }
         return false;
     }
@@ -848,10 +496,12 @@ public class SpoonCodeAnalyzer {
         return feignClients.contains(declaringType);
     }
 
-    private ExternalCallInfo buildRestTemplateCall(CtInvocation<?> invocation, String declaringType, String methodName,
-                                                    Map<String, String> properties, Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
-        String httpMethod = restTemplateHttpMethod(methodName, invocation);
-        String url = extractUrlLiteral(invocation.getArguments(), properties, valueFieldMapping, declaringClass);
+    private ExternalCallInfo buildRestTemplateCall(CtInvocation<?> invocation, String declaringType,
+                                                   String methodName, Map<String, String> properties,
+                                                   Map<String, String> valueFieldMapping,
+                                                   CtType<?> declaringClass) {
+        String httpMethod = resolveRestTemplateHttpMethod(methodName, invocation);
+        String url = extractUrlFromArguments(invocation.getArguments(), properties, valueFieldMapping, declaringClass);
 
         return ExternalCallInfo.builder()
                 .clientType("RestTemplate")
@@ -864,12 +514,12 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    private ExternalCallInfo buildWebClientCall(CtInvocation<?> invocation, String declaringType, String methodName,
-                                                 Map<String, String> properties, Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
-        String httpMethod = methodName.toUpperCase(Locale.ROOT);
-        if (!WEBCLIENT_HTTP_METHODS.contains(methodName)) {
-            httpMethod = "UNKNOWN";
-        }
+    private ExternalCallInfo buildWebClientCall(CtInvocation<?> invocation, String declaringType,
+                                                String methodName, Map<String, String> properties,
+                                                Map<String, String> valueFieldMapping,
+                                                CtType<?> declaringClass) {
+        String httpMethod = WEBCLIENT_HTTP_METHODS.contains(methodName)
+                ? methodName.toUpperCase(Locale.ROOT) : "UNKNOWN";
         String url = extractUrlFromWebClientChain(invocation, properties, valueFieldMapping, declaringClass);
 
         return ExternalCallInfo.builder()
@@ -883,22 +533,27 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    private ExternalCallInfo buildFeignCall(CtInvocation<?> invocation, CtExecutableReference<?> execRef, String declaringType) {
+    private ExternalCallInfo buildFeignCall(CtInvocation<?> invocation, CtExecutableReference<?> execRef,
+                                            String declaringType) {
         String httpMethod = "REQUEST";
         String url = "<dynamic>";
 
-        CtExecutable<?> decl = execRef.getExecutableDeclaration();
-        if (decl instanceof CtMethod) {
-            CtMethod<?> feignMethod = (CtMethod<?>) decl;
-            String basePath = extractBasePath(feignMethod.getDeclaringType());
-            for (CtAnnotation<?> annotation : feignMethod.getAnnotations()) {
-                String annotationName = annotation.getAnnotationType().getSimpleName();
-                if (MAPPING_ANNOTATIONS.contains(annotationName)) {
-                    httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annotationName, "REQUEST");
-                    url = extractPath(annotation, basePath);
-                    break;
+        try {
+            CtExecutable<?> decl = execRef.getExecutableDeclaration();
+            if (decl instanceof CtMethod) {
+                CtMethod<?> feignMethod = (CtMethod<?>) decl;
+                String basePath = extractBasePath(feignMethod.getDeclaringType());
+                for (CtAnnotation<?> ann : feignMethod.getAnnotations()) {
+                    String annName = ann.getAnnotationType().getSimpleName();
+                    if (MAPPING_ANNOTATIONS.contains(annName)) {
+                        httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annName, "REQUEST");
+                        url = extractPath(ann, basePath);
+                        break;
+                    }
                 }
             }
+        } catch (Exception e) {
+            log.debug("Could not resolve Feign method: {}", execRef.getSimpleName());
         }
 
         return ExternalCallInfo.builder()
@@ -912,9 +567,9 @@ public class SpoonCodeAnalyzer {
                 .build();
     }
 
-    private String restTemplateHttpMethod(String methodName, CtInvocation<?> invocation) {
+    private String resolveRestTemplateHttpMethod(String methodName, CtInvocation<?> invocation) {
         if ("exchange".equals(methodName)) {
-            String httpMethod = extractHttpMethodLiteral(invocation.getArguments());
+            String httpMethod = extractHttpMethodFromArgs(invocation.getArguments());
             return httpMethod != null ? httpMethod : "REQUEST";
         }
         if (methodName.startsWith("get")) return "GET";
@@ -924,8 +579,26 @@ public class SpoonCodeAnalyzer {
         return "REQUEST";
     }
 
-    private String extractUrlLiteral(List<? extends CtExpression<?>> arguments, Map<String, String> properties,
-                                      Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
+    private String extractHttpMethodFromArgs(List<? extends CtExpression<?>> arguments) {
+        for (CtExpression<?> arg : arguments) {
+            if (arg instanceof CtLiteral) {
+                Object value = ((CtLiteral<?>) arg).getValue();
+                if (value instanceof String) return value.toString();
+            }
+            String text = arg.toString();
+            if (text != null && text.contains("HttpMethod")) {
+                return text.replace("HttpMethod.", "");
+            }
+        }
+        return null;
+    }
+
+    // ========================= URL EXTRACTION =========================
+
+    private String extractUrlFromArguments(List<? extends CtExpression<?>> arguments,
+                                           Map<String, String> properties,
+                                           Map<String, String> valueFieldMapping,
+                                           CtType<?> declaringClass) {
         for (CtExpression<?> arg : arguments) {
             String extracted = extractStringFromExpression(arg, properties, valueFieldMapping, declaringClass);
             if (extracted != null && !extracted.isBlank()) {
@@ -935,346 +608,243 @@ public class SpoonCodeAnalyzer {
         return "<dynamic>";
     }
 
-    private String extractStringFromExpression(CtExpression<?> expression, Map<String, String> properties,
-                                                 Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
-        if (expression == null) {
-            return null;
-        }
-
-        if (expression instanceof CtLiteral) {
-            Object value = ((CtLiteral<?>) expression).getValue();
-            if (value instanceof String) {
-                return (String) value;
-            }
-        }
-
-        // Handle CtFieldRead (field access like marksTopic or TOPIC_CONSTANT)
-        if (expression instanceof CtFieldRead) {
-            CtFieldRead<?> fieldRead = (CtFieldRead<?>) expression;
-
-            try {
-                CtFieldReference<?> fieldRef = fieldRead.getVariable();
-                if (fieldRef != null) {
-                    String fieldName = fieldRef.getSimpleName();
-                    CtTypeReference<?> declaringType = fieldRef.getDeclaringType();
-
-                    if (declaringType != null) {
-                        String fieldClassName = declaringType.getQualifiedName();
-                        String qualifiedFieldName = fieldClassName + "." + fieldName;
-
-                        log.debug("CtFieldRead: field={}, qualified={}", fieldName, qualifiedFieldName);
-
-                        // Try exact match in valueFieldMapping
-                        String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
-                        if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                            return resolvedValue;
-                        }
-
-                        // Try suffix match
-                        for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
-                            if (entry.getKey().endsWith("." + fieldName)) {
-                                return entry.getValue();
-                            }
-                        }
-
-                        // Fallback: try to resolve static constant directly from AST
-                        try {
-                            CtField<?> fieldDecl = fieldRef.getFieldDeclaration();
-                            if (fieldDecl != null && fieldDecl.isStatic() && fieldDecl.isFinal()) {
-                                CtExpression<?> defaultExpr = fieldDecl.getDefaultExpression();
-                                if (defaultExpr instanceof CtLiteral) {
-                                    Object literalVal = ((CtLiteral<?>) defaultExpr).getValue();
-                                    if (literalVal instanceof String) {
-                                        String constValue = (String) literalVal;
-                                        if (constValue.contains("${")) {
-                                            constValue = propertyResolver.resolveProperty(constValue, properties);
-                                        }
-                                        log.debug("Resolved static constant {} = {}", qualifiedFieldName, constValue);
-                                        return constValue;
-                                    }
-                                }
-                            }
-                        } catch (Exception ex) {
-                            log.debug("Could not resolve field declaration for: {}", qualifiedFieldName);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.debug("Error extracting field from CtFieldRead: {}", e.getMessage());
-            }
-        }
-
-        if (expression instanceof CtBinaryOperator) {
-            CtBinaryOperator<?> binary = (CtBinaryOperator<?>) expression;
-            if (binary.getKind() == BinaryOperatorKind.PLUS) {
-                String left = extractStringFromExpression(binary.getLeftHandOperand(), properties, valueFieldMapping, declaringClass);
-                String right = extractStringFromExpression(binary.getRightHandOperand(), properties, valueFieldMapping, declaringClass);
-                return joinUrlPieces(left, right);
-            }
-        }
-
-        // Try to resolve field references (e.g., userServiceUrl, marksTopic)
-        String text = expression.toString();
-        if (text != null && !text.isBlank()) {
-            // Check if this is a simple field reference (single identifier without dots)
-            String fieldName = text.trim();
-
-            // Try direct lookup first - field name with declaring class
-            String qualifiedFieldName = declaringClass != null ?
-                    declaringClass.getQualifiedName() + "." + fieldName : fieldName;
-
-            log.debug("Attempting to resolve field reference: {} (qualified: {})", fieldName, qualifiedFieldName);
-
-            // Try to resolve from valueFieldMapping with qualified name
-            String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
-            if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                return resolvedValue;
-            }
-
-            // If still a placeholder, try to resolve it
-            if (resolvedValue != null && propertyResolver.hasPlaceholders(resolvedValue)) {
-                String fullyResolved = propertyResolver.resolveProperty(resolvedValue, properties);
-                if (fullyResolved != null && !fullyResolved.startsWith("${")) {
-                    return fullyResolved;
-                }
-            }
-
-            // Try without the declaring class prefix (for same-class fields)
-            resolvedValue = valueFieldMapping.get(fieldName);
-            if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                return resolvedValue;
-            }
-
-            // Final fallback: search for any field ending with this name
-            for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
-                if (entry.getKey().endsWith("." + fieldName)) {
-                    return entry.getValue();
-                }
-            }
-
-            log.debug("Could not resolve field reference: '{}'", fieldName);
-            return "<dynamic>";
-        }
-        return null;
-    }
-
-    private String joinUrlPieces(String left, String right) {
-        String safeLeft = left == null ? "<dynamic>" : left;
-        String safeRight = right == null ? "<dynamic>" : right;
-
-        if ("<dynamic>".equals(safeLeft) && safeRight.startsWith("/")) {
-            return safeRight;
-        }
-        if ("<dynamic>".equals(safeRight) && safeLeft.contains("/")) {
-            return safeLeft + "<dynamic>";
-        }
-        return safeLeft + safeRight;
-    }
-
-    private String normalizeUrl(String url) {
-        if (url == null) {
-            return "<dynamic>";
-        }
-        if ("<dynamic>".equals(url)) {
-            return url;
-        }
-        if (url.startsWith("<dynamic>/")) {
-            return url.substring("<dynamic>".length());
-        }
-        return url;
-    }
-
-    private String extractUrlFromWebClientChain(CtInvocation<?> invocation, Map<String, String> properties,
-                                                 Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
-        // Walk invocation target chain to find uri("...") call
+    private String extractUrlFromWebClientChain(CtInvocation<?> invocation,
+                                                Map<String, String> properties,
+                                                Map<String, String> valueFieldMapping,
+                                                CtType<?> declaringClass) {
         CtExpression<?> target = invocation.getTarget();
         while (target instanceof CtInvocation) {
             CtInvocation<?> targetInvocation = (CtInvocation<?>) target;
             if ("uri".equals(targetInvocation.getExecutable().getSimpleName())) {
-                return extractUrlLiteral(targetInvocation.getArguments(), properties, valueFieldMapping, declaringClass);
+                return extractUrlFromArguments(
+                        targetInvocation.getArguments(), properties, valueFieldMapping, declaringClass);
             }
             target = targetInvocation.getTarget();
         }
         return "<dynamic>";
     }
 
-    private Set<String> findFeignClientTypes(CtModel model) {
-        Set<String> feignClients = new HashSet<>();
+    // ========================= STRING EXPRESSION RESOLUTION =========================
+
+    /**
+     * Extract a string value from a Spoon expression.
+     * Handles: string literals, field references, static constants, string concatenation.
+     */
+    private String extractStringFromExpression(CtExpression<?> expression,
+                                               Map<String, String> properties,
+                                               Map<String, String> valueFieldMapping,
+                                               CtType<?> declaringClass) {
+        if (expression == null) return null;
+
+        // String literal: "http://example.com/api"
+        if (expression instanceof CtLiteral) {
+            Object value = ((CtLiteral<?>) expression).getValue();
+            if (value instanceof String) return (String) value;
+        }
+
+        // Field reference: marksTopic, TOPIC_CONSTANT, etc.
+        if (expression instanceof CtFieldRead) {
+            return resolveFieldRead((CtFieldRead<?>) expression, properties, valueFieldMapping);
+        }
+
+        // String concatenation: baseUrl + "/api/users"
+        if (expression instanceof CtBinaryOperator) {
+            CtBinaryOperator<?> binary = (CtBinaryOperator<?>) expression;
+            if (binary.getKind() == BinaryOperatorKind.PLUS) {
+                String left = extractStringFromExpression(
+                        binary.getLeftHandOperand(), properties, valueFieldMapping, declaringClass);
+                String right = extractStringFromExpression(
+                        binary.getRightHandOperand(), properties, valueFieldMapping, declaringClass);
+                return joinUrlParts(left, right);
+            }
+        }
+
+        // Fallback: try to resolve from expression text (field name reference)
+        String text = expression.toString();
+        if (text != null && !text.isBlank()) {
+            String resolved = resolveFieldByName(text.trim(), declaringClass, properties, valueFieldMapping);
+            if (resolved != null) return resolved;
+            return "<dynamic>";
+        }
+        return null;
+    }
+
+    private String resolveFieldRead(CtFieldRead<?> fieldRead,
+                                    Map<String, String> properties,
+                                    Map<String, String> valueFieldMapping) {
+        try {
+            CtFieldReference<?> fieldRef = fieldRead.getVariable();
+            if (fieldRef == null) return null;
+
+            String fieldName = fieldRef.getSimpleName();
+            CtTypeReference<?> declaringType = fieldRef.getDeclaringType();
+
+            if (declaringType != null) {
+                String qualifiedName = declaringType.getQualifiedName() + "." + fieldName;
+
+                // Try exact match in value field mapping
+                String resolved = valueFieldMapping.get(qualifiedName);
+                if (resolved != null && !resolved.startsWith("${")) return resolved;
+
+                // Try suffix match (field name only)
+                for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
+                    if (entry.getKey().endsWith("." + fieldName)) return entry.getValue();
+                }
+
+                // Try resolving static constant directly from AST
+                try {
+                    CtField<?> fieldDecl = fieldRef.getFieldDeclaration();
+                    if (fieldDecl != null && fieldDecl.isStatic() && fieldDecl.isFinal()) {
+                        CtExpression<?> defaultExpr = fieldDecl.getDefaultExpression();
+                        if (defaultExpr instanceof CtLiteral) {
+                            Object literalVal = ((CtLiteral<?>) defaultExpr).getValue();
+                            if (literalVal instanceof String) {
+                                String constValue = (String) literalVal;
+                                if (constValue.contains("${")) {
+                                    constValue = propertyResolver.resolveProperty(constValue, properties);
+                                }
+                                return constValue;
+                            }
+                        }
+                    }
+                } catch (Exception ex) {
+                    log.debug("Could not resolve field declaration: {}", qualifiedName);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Error resolving field read: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private String resolveFieldByName(String fieldName, CtType<?> declaringClass,
+                                      Map<String, String> properties,
+                                      Map<String, String> valueFieldMapping) {
+        // Try with declaring class qualifier
+        if (declaringClass != null) {
+            String qualified = declaringClass.getQualifiedName() + "." + fieldName;
+            String resolved = valueFieldMapping.get(qualified);
+            if (resolved != null && !resolved.startsWith("${")) return resolved;
+
+            // Try resolving the placeholder value
+            if (resolved != null && propertyResolver.hasPlaceholders(resolved)) {
+                String fullyResolved = propertyResolver.resolveProperty(resolved, properties);
+                if (!fullyResolved.startsWith("${")) return fullyResolved;
+            }
+        }
+
+        // Try without qualifier
+        String resolved = valueFieldMapping.get(fieldName);
+        if (resolved != null && !resolved.startsWith("${")) return resolved;
+
+        // Try suffix match
+        for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
+            if (entry.getKey().endsWith("." + fieldName)) return entry.getValue();
+        }
+
+        return null;
+    }
+
+    private String joinUrlParts(String left, String right) {
+        String safeLeft = left == null ? "<dynamic>" : left;
+        String safeRight = right == null ? "<dynamic>" : right;
+
+        if ("<dynamic>".equals(safeLeft) && safeRight.startsWith("/")) return safeRight;
+        if ("<dynamic>".equals(safeRight) && safeLeft.contains("/")) return safeLeft + "<dynamic>";
+        return safeLeft + safeRight;
+    }
+
+    private String normalizeUrl(String url) {
+        if (url == null || "<dynamic>".equals(url)) return "<dynamic>";
+        if (url.startsWith("<dynamic>/")) return url.substring("<dynamic>".length());
+        return url;
+    }
+
+    // ========================= VALUE FIELD MAPPING =========================
+
+    /**
+     * Build a mapping of field names to resolved values.
+     * Captures @Value annotated fields and static final String constants.
+     */
+    private Map<String, String> buildValueFieldMapping(CtModel model, String basePackage,
+                                                       Map<String, String> properties) {
+        Map<String, String> fieldMapping = new HashMap<>();
+
         model.getAllTypes().stream()
-                .filter(CtType::isInterface)
-                .forEach(ctType -> {
-                    boolean isFeign = ctType.getAnnotations().stream()
-                            .anyMatch(a -> a.getAnnotationType().getSimpleName().equals("FeignClient"));
-                    if (isFeign) {
-                        feignClients.add(ctType.getQualifiedName());
+                .filter(CtType::isClass)
+                .filter(type -> matchesPackage(type, basePackage))
+                .forEach(ctClass -> {
+                    for (CtField<?> field : ctClass.getFields()) {
+                        // @Value annotated fields
+                        captureValueAnnotatedField(field, ctClass, properties, fieldMapping);
+
+                        // Static final String constants
+                        captureStaticConstant(field, ctClass, properties, fieldMapping);
                     }
                 });
-        return feignClients;
+
+        log.info("Built value field mapping with {} entries", fieldMapping.size());
+        return fieldMapping;
     }
 
-    private List<ExternalCallInfo> collectExternalCallsFromCalls(List<MethodCall> calls) {
-        List<ExternalCallInfo> externalCalls = new ArrayList<>();
-        if (calls == null) {
-            return externalCalls;
-        }
-        for (MethodCall call : calls) {
-            if (call.getExternalCalls() != null) {
-                externalCalls.addAll(call.getExternalCalls());
-            }
-            if (call.getCalls() != null && !call.getCalls().isEmpty()) {
-                externalCalls.addAll(collectExternalCallsFromCalls(call.getCalls()));
-            }
-        }
-        return externalCalls;
-    }
-
-    private List<ExternalCallInfo> mergeExternalCalls(
-            List<ExternalCallInfo> direct,
-            List<ExternalCallInfo> nested) {
-        List<ExternalCallInfo> merged = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-
-        if (direct != null) {
-            for (ExternalCallInfo call : direct) {
-                String key = call.getClientType() + ":" + call.getTargetClass() + ":" + call.getTargetMethod() + ":" + call.getUrl();
-                if (seen.add(key)) {
-                    merged.add(call);
-                }
-            }
-        }
-        if (nested != null) {
-            for (ExternalCallInfo call : nested) {
-                String key = call.getClientType() + ":" + call.getTargetClass() + ":" + call.getTargetMethod() + ":" + call.getUrl();
-                if (seen.add(key)) {
-                    merged.add(call);
-                }
-            }
-        }
-        return merged;
-    }
-
-    private String extractHttpMethodLiteral(List<? extends CtExpression<?>> arguments) {
-        for (CtExpression<?> arg : arguments) {
-            if (arg instanceof CtLiteral) {
-                Object value = ((CtLiteral<?>) arg).getValue();
-                if (value instanceof String) {
-                    return value.toString();
-                }
-            }
-            if (arg != null && arg.toString().contains("HttpMethod")) {
-                return arg.toString().replace("HttpMethod.", "");
-            }
-        }
-        return null;
-    }
-
-    private RequestBodyInfo extractRequestBodyInfo(CtMethod<?> method) {
-        try {
-            for (CtParameter parameter : method.getParameters()) {
-                // Check if parameter has @RequestBody annotation
-                boolean hasRequestBody = parameter.getAnnotations().stream()
-                        .anyMatch(a -> a.getAnnotationType().getSimpleName().equals("RequestBody"));
-
-                if (hasRequestBody) {
-                    CtTypeReference<?> paramType = parameter.getType();
-                    String typeName = paramType.getQualifiedName();
-                    String simpleTypeName = paramType.getSimpleName();
-                    boolean isCollection = typeName.contains("List") || typeName.contains("Collection");
-
-                    List<String> fields = new ArrayList<>();
-                    try {
-                        CtType<?> paramClass = paramType.getTypeDeclaration();
-                        if (paramClass != null && paramClass.isClass()) {
-                            paramClass.getFields().stream()
-                                    .filter(f -> !f.isPrivate())
-                                    .map(CtField::getSimpleName)
-                                    .forEach(fields::add);
-                        }
-                    } catch (Exception e) {
-                        log.debug("Could not extract fields for type: {}", typeName);
-                    }
-
-                    return RequestBodyInfo.builder()
-                            .type(typeName)
-                            .simpleTypeName(simpleTypeName)
-                            .fields(fields)
-                            .isCollection(isCollection)
-                            .isWrapper(true)
-                            .build();
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Error extracting request body info: {}", e.getMessage());
-        }
-
-        return null;
-    }
-
-    private ResponseTypeInfo extractResponseTypeInfo(CtMethod<?> method, String httpMethod) {
-        try {
-            CtTypeReference<?> returnType = method.getType();
-
-            if (returnType == null || "void".equals(returnType.getSimpleName())) {
-                return ResponseTypeInfo.builder()
-                        .statusCode(204)
-                        .isCollection(false)
-                        .build();
-            }
-
-            String typeName = returnType.getQualifiedName();
-            String simpleTypeName = returnType.getSimpleName();
-            boolean isCollection = typeName.contains("List") || typeName.contains("Collection") || typeName.contains("ResponseEntity<List");
-
-            // Extract status code based on HTTP method
-            int statusCode = 200; // default
-            if ("POST".equals(httpMethod)) {
-                statusCode = 201;
-            }
-
-            List<String> fields = new ArrayList<>();
+    private void captureValueAnnotatedField(CtField<?> field, CtType<?> ctClass,
+                                            Map<String, String> properties,
+                                            Map<String, String> fieldMapping) {
+        for (CtAnnotation<?> ann : field.getAnnotations()) {
+            if (!"Value".equals(ann.getAnnotationType().getSimpleName())) continue;
             try {
-                CtType<?> returnClass = returnType.getTypeDeclaration();
-                if (returnClass != null && returnClass.isClass()) {
-                    returnClass.getFields().stream()
-                            .filter(f -> !f.isPrivate())
-                            .map(CtField::getSimpleName)
-                            .forEach(fields::add);
-                }
+                Object valueObj = ann.getValue("value");
+                if (valueObj == null) continue;
+
+                String placeholder = valueObj.toString().replaceAll("^\"|\"$", "");
+                String resolvedValue = propertyResolver.resolveProperty(placeholder, properties);
+                String key = ctClass.getQualifiedName() + "." + field.getSimpleName();
+                fieldMapping.put(key, resolvedValue);
             } catch (Exception e) {
-                log.debug("Could not extract fields for return type: {}", typeName);
+                log.debug("Could not resolve @Value for {}.{}: {}",
+                        ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
             }
-
-            return ResponseTypeInfo.builder()
-                    .type(typeName)
-                    .simpleTypeName(simpleTypeName)
-                    .fields(fields)
-                    .isCollection(isCollection)
-                    .statusCode(statusCode)
-                    .build();
-
-        } catch (Exception e) {
-            log.debug("Error extracting response type info: {}", e.getMessage());
         }
-
-        return ResponseTypeInfo.builder()
-                .statusCode(200)
-                .isCollection(false)
-                .build();
     }
 
-    private DatabaseOperationInfo extractDatabaseOperations(CtType<?> repositoryType, CtModel model, String dbType) {
+    private void captureStaticConstant(CtField<?> field, CtType<?> ctClass,
+                                       Map<String, String> properties,
+                                       Map<String, String> fieldMapping) {
         try {
-            // Get generic type (entity class) from repository
-            String entityClassName = extractEntityClassName(repositoryType);
+            if (!field.isStatic() || !field.isFinal()) return;
+            if (field.getType() == null || !"String".equals(field.getType().getSimpleName())) return;
 
-            if (entityClassName == null) {
-                return null;
+            CtExpression<?> defaultExpr = field.getDefaultExpression();
+            if (!(defaultExpr instanceof CtLiteral)) return;
+
+            Object literalValue = ((CtLiteral<?>) defaultExpr).getValue();
+            if (!(literalValue instanceof String)) return;
+
+            String value = (String) literalValue;
+            if (value.contains("${")) {
+                value = propertyResolver.resolveProperty(value, properties);
             }
+
+            String key = ctClass.getQualifiedName() + "." + field.getSimpleName();
+            fieldMapping.put(key, value);
+        } catch (Exception e) {
+            log.debug("Could not extract static constant for {}.{}: {}",
+                    ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
+        }
+    }
+
+    // ========================= DATABASE OPERATIONS =========================
+
+    private DatabaseOperationInfo extractDatabaseOperations(CtType<?> repositoryType, CtModel model,
+                                                            String dbType) {
+        try {
+            String entityClassName = extractEntityClassName(repositoryType);
+            if (entityClassName == null) return null;
 
             // Find entity class in model
             CtType<?> entityClass = model.getAllTypes().stream()
-                    .filter(t -> t.getQualifiedName().equals(entityClassName) ||
-                                t.getSimpleName().equals(entityClassName))
+                    .filter(t -> t.getQualifiedName().equals(entityClassName)
+                            || t.getSimpleName().equals(entityClassName))
                     .findFirst()
                     .orElse(null);
 
@@ -1283,12 +853,9 @@ public class SpoonCodeAnalyzer {
                 return null;
             }
 
-            // Extract table name from entity
             String tableName = extractTableName(entityClass, entityClassName);
-            String tableSource = determineTableSource(entityClass, entityClassName);
-
-            // Determine database operations based on repository methods
-            List<String> operations = extractDatabaseOperations(repositoryType);
+            String tableSource = determineTableSource(entityClass);
+            List<String> operations = inferDatabaseOperations(repositoryType);
 
             return DatabaseOperationInfo.builder()
                     .className(repositoryType.getSimpleName())
@@ -1301,7 +868,6 @@ public class SpoonCodeAnalyzer {
                     .operations(operations)
                     .line(createLineRange(repositoryType))
                     .build();
-
         } catch (Exception e) {
             log.debug("Error extracting database operations: {}", e.getMessage());
             return null;
@@ -1309,159 +875,342 @@ public class SpoonCodeAnalyzer {
     }
 
     private String extractEntityClassName(CtType<?> repositoryType) {
-        try {
-            // For JpaRepository<Entity, ID>, extract Entity
-            if (repositoryType.isInterface()) {
-                for (CtTypeReference<?> superInterface : repositoryType.getSuperInterfaces()) {
-                    String interfaceName = superInterface.getQualifiedName();
-                    if (interfaceName.contains("Repository")) {
-                        // Get generic type parameters
-                        try {
-                            String typeString = superInterface.toString();
-                            if (typeString.contains("<")) {
-                                int start = typeString.indexOf("<") + 1;
-                                int comma = typeString.indexOf(",");
-                                if (comma > start) {
-                                    return typeString.substring(start, comma).trim();
-                                } else {
-                                    int end = typeString.indexOf(">");
-                                    if (end > start) {
-                                        return typeString.substring(start, end).trim();
-                                    }
-                                }
-                            }
-                        } catch (Exception e) {
-                            log.debug("Could not extract generic type from: {}", superInterface);
-                        }
-                    }
-                }
+        if (!repositoryType.isInterface()) return null;
+
+        for (CtTypeReference<?> superInterface : repositoryType.getSuperInterfaces()) {
+            if (!superInterface.getQualifiedName().contains("Repository")) continue;
+
+            try {
+                String typeString = superInterface.toString();
+                if (!typeString.contains("<")) continue;
+
+                int start = typeString.indexOf("<") + 1;
+                int comma = typeString.indexOf(",");
+                int end = comma > start ? comma : typeString.indexOf(">");
+                if (end > start) return typeString.substring(start, end).trim();
+            } catch (Exception e) {
+                log.debug("Could not extract generic type from: {}", superInterface);
             }
-        } catch (Exception e) {
-            log.debug("Error extracting entity class: {}", e.getMessage());
         }
         return null;
     }
 
     private String extractTableName(CtType<?> entityClass, String entityClassName) {
         // Try @Table annotation
-        try {
-            for (CtAnnotation<?> annotation : entityClass.getAnnotations()) {
-                String annotationName = annotation.getAnnotationType().getSimpleName();
-                if ("Table".equals(annotationName)) {
-                    Object nameValue = annotation.getValues().get("name");
-                    if (nameValue != null) {
-                        return nameValue.toString().replaceAll("[\"\\s]", "");
-                    }
-                }
+        for (CtAnnotation<?> ann : entityClass.getAnnotations()) {
+            String annName = ann.getAnnotationType().getSimpleName();
+            if ("Table".equals(annName)) {
+                Object nameValue = ann.getValues().get("name");
+                if (nameValue != null) return nameValue.toString().replaceAll("[\"\\s]", "");
             }
-        } catch (Exception e) {
-            log.debug("Error extracting @Table annotation: {}", e.getMessage());
+            if ("Document".equals(annName)) {
+                Object collectionValue = ann.getValues().get("collection");
+                if (collectionValue != null) return collectionValue.toString().replaceAll("[\"\\s]", "");
+            }
         }
 
-        // Try @Document annotation (MongoDB)
-        try {
-            for (CtAnnotation<?> annotation : entityClass.getAnnotations()) {
-                String annotationName = annotation.getAnnotationType().getSimpleName();
-                if ("Document".equals(annotationName)) {
-                    Object collectionValue = annotation.getValues().get("collection");
-                    if (collectionValue != null) {
-                        return collectionValue.toString().replaceAll("[\"\\s]", "");
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Error extracting @Document annotation: {}", e.getMessage());
-        }
-
-        // Fallback: derive from class name (convert camelCase to snake_case)
+        // Fallback: derive from class name (CamelCase -> snake_case)
         return camelCaseToSnakeCase(extractSimpleName(entityClassName));
     }
 
-    private String determineTableSource(CtType<?> entityClass, String entityClassName) {
-        // Check for @Table annotation
-        try {
-            for (CtAnnotation<?> annotation : entityClass.getAnnotations()) {
-                if ("Table".equals(annotation.getAnnotationType().getSimpleName())) {
-                    return "@Table";
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Error checking @Table: {}", e.getMessage());
+    private String determineTableSource(CtType<?> entityClass) {
+        for (CtAnnotation<?> ann : entityClass.getAnnotations()) {
+            String annName = ann.getAnnotationType().getSimpleName();
+            if ("Table".equals(annName)) return "@Table";
+            if ("Document".equals(annName)) return "@Document";
         }
-
-        // Check for @Document annotation
-        try {
-            for (CtAnnotation<?> annotation : entityClass.getAnnotations()) {
-                if ("Document".equals(annotation.getAnnotationType().getSimpleName())) {
-                    return "@Document";
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Error checking @Document: {}", e.getMessage());
-        }
-
-        // Fallback: derived from class name
         return "derived_from_class_name";
     }
 
-    private List<String> extractDatabaseOperations(CtType<?> repositoryType) {
-        List<String> operations = new ArrayList<>();
-        Set<String> operationSet = new HashSet<>();
+    private List<String> inferDatabaseOperations(CtType<?> repositoryType) {
+        Set<String> operations = new TreeSet<>();
 
+        for (CtMethod<?> method : repositoryType.getMethods()) {
+            String name = method.getSimpleName().toLowerCase(Locale.ROOT);
+
+            if (name.contains("find") || name.contains("get") || name.contains("read") || name.contains("query"))
+                operations.add("READ");
+            if (name.contains("save") || name.contains("create") || name.contains("insert") || name.contains("persist"))
+                operations.add("WRITE");
+            if (name.contains("update") || name.contains("merge"))
+                operations.add("UPDATE");
+            if (name.contains("delete") || name.contains("remove"))
+                operations.add("DELETE");
+        }
+
+        // Default operations if no custom methods
+        if (operations.isEmpty()) {
+            operations.addAll(List.of("READ", "WRITE", "DELETE"));
+        }
+
+        return new ArrayList<>(operations);
+    }
+
+    // ========================= REQUEST/RESPONSE EXTRACTION =========================
+
+    private RequestBodyInfo extractRequestBody(CtMethod<?> method) {
         try {
-            for (CtMethod<?> method : repositoryType.getMethods()) {
-                String methodName = method.getSimpleName().toLowerCase(Locale.ROOT);
+            for (CtParameter<?> parameter : method.getParameters()) {
+                boolean hasRequestBody = parameter.getAnnotations().stream()
+                        .anyMatch(a -> "RequestBody".equals(a.getAnnotationType().getSimpleName()));
 
-                // READ operations
-                if (methodName.contains("find") || methodName.contains("get") ||
-                    methodName.contains("read") || methodName.contains("query")) {
-                    operationSet.add("READ");
-                }
+                if (!hasRequestBody) continue;
 
-                // WRITE/CREATE operations
-                if (methodName.contains("save") || methodName.contains("create") ||
-                    methodName.contains("insert") || methodName.contains("persist")) {
-                    operationSet.add("WRITE");
-                }
+                CtTypeReference<?> paramType = parameter.getType();
+                String typeName = paramType.getQualifiedName();
+                boolean isCollection = typeName.contains("List") || typeName.contains("Collection");
 
-                // UPDATE operations
-                if (methodName.contains("update") || methodName.contains("merge")) {
-                    operationSet.add("UPDATE");
-                }
+                List<String> fields = extractTypeFields(paramType);
 
-                // DELETE operations
-                if (methodName.contains("delete") || methodName.contains("remove")) {
-                    operationSet.add("DELETE");
-                }
+                return RequestBodyInfo.builder()
+                        .type(typeName)
+                        .simpleTypeName(paramType.getSimpleName())
+                        .fields(fields)
+                        .isCollection(isCollection)
+                        .isWrapper(true)
+                        .build();
             }
         } catch (Exception e) {
-            log.debug("Error extracting database operations: {}", e.getMessage());
+            log.debug("Error extracting request body: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private ResponseTypeInfo extractResponseType(CtMethod<?> method, String httpMethod) {
+        try {
+            CtTypeReference<?> returnType = method.getType();
+
+            if (returnType == null || "void".equals(returnType.getSimpleName())) {
+                return ResponseTypeInfo.builder().statusCode(204).isCollection(false).build();
+            }
+
+            String typeName = returnType.getQualifiedName();
+            boolean isCollection = typeName.contains("List") || typeName.contains("Collection")
+                    || typeName.contains("ResponseEntity<List");
+
+            int statusCode = "POST".equals(httpMethod) ? 201 : 200;
+
+            List<String> fields = extractTypeFields(returnType);
+
+            return ResponseTypeInfo.builder()
+                    .type(typeName)
+                    .simpleTypeName(returnType.getSimpleName())
+                    .fields(fields)
+                    .isCollection(isCollection)
+                    .statusCode(statusCode)
+                    .build();
+        } catch (Exception e) {
+            log.debug("Error extracting response type: {}", e.getMessage());
+        }
+        return ResponseTypeInfo.builder().statusCode(200).isCollection(false).build();
+    }
+
+    private List<String> extractTypeFields(CtTypeReference<?> typeRef) {
+        List<String> fields = new ArrayList<>();
+        try {
+            CtType<?> typeDecl = typeRef.getTypeDeclaration();
+            if (typeDecl != null && typeDecl.isClass()) {
+                typeDecl.getFields().stream()
+                        .filter(f -> !f.isPrivate())
+                        .map(CtField::getSimpleName)
+                        .forEach(fields::add);
+            }
+        } catch (Exception e) {
+            log.debug("Could not extract fields for type: {}", typeRef.getQualifiedName());
+        }
+        return fields;
+    }
+
+    // ========================= CALL COLLECTION HELPERS =========================
+
+    private List<ExternalCallInfo> collectExternalCallsFromCalls(List<MethodCall> calls) {
+        List<ExternalCallInfo> result = new ArrayList<>();
+        if (calls == null) return result;
+        for (MethodCall call : calls) {
+            if (call.getExternalCalls() != null) result.addAll(call.getExternalCalls());
+            if (call.getCalls() != null) result.addAll(collectExternalCallsFromCalls(call.getCalls()));
+        }
+        return result;
+    }
+
+    private List<KafkaCallInfo> collectKafkaCallsFromCalls(List<MethodCall> calls) {
+        List<KafkaCallInfo> result = new ArrayList<>();
+        if (calls == null) return result;
+        for (MethodCall call : calls) {
+            if (call.getKafkaCalls() != null) result.addAll(call.getKafkaCalls());
+            if (call.getCalls() != null) result.addAll(collectKafkaCallsFromCalls(call.getCalls()));
+        }
+        return result;
+    }
+
+    private List<ExternalCallInfo> mergeExternalCalls(List<ExternalCallInfo> direct,
+                                                      List<ExternalCallInfo> nested) {
+        Map<String, ExternalCallInfo> merged = new LinkedHashMap<>();
+        if (direct != null) {
+            for (ExternalCallInfo call : direct) {
+                String key = call.getClientType() + ":" + call.getUrl() + ":" + call.getHttpMethod();
+                merged.putIfAbsent(key, call);
+            }
+        }
+        if (nested != null) {
+            for (ExternalCallInfo call : nested) {
+                String key = call.getClientType() + ":" + call.getUrl() + ":" + call.getHttpMethod();
+                merged.putIfAbsent(key, call);
+            }
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    // ========================= FEIGN CLIENT DETECTION =========================
+
+    private Set<String> findFeignClientTypes(CtModel model) {
+        return model.getAllTypes().stream()
+                .filter(CtType::isInterface)
+                .filter(t -> t.getAnnotations().stream()
+                        .anyMatch(a -> "FeignClient".equals(a.getAnnotationType().getSimpleName())))
+                .map(CtType::getQualifiedName)
+                .collect(Collectors.toSet());
+    }
+
+    // ========================= TYPE CHECKING =========================
+
+    private boolean isSpringBootApplication(CtType<?> ctType) {
+        return ctType.getAnnotations().stream()
+                .anyMatch(a -> "SpringBootApplication".equals(a.getAnnotationType().getSimpleName()));
+    }
+
+    private boolean isController(CtType<?> ctType) {
+        return ctType.getAnnotations().stream()
+                .anyMatch(a -> {
+                    String name = a.getAnnotationType().getSimpleName();
+                    return "RestController".equals(name) || "Controller".equals(name);
+                });
+    }
+
+    private boolean isService(CtType<?> ctType) {
+        return ctType.getAnnotations().stream()
+                .anyMatch(a -> "Service".equals(a.getAnnotationType().getSimpleName()));
+    }
+
+    private boolean isRepository(CtType<?> ctType) {
+        boolean hasAnnotation = ctType.getAnnotations().stream()
+                .anyMatch(a -> "Repository".equals(a.getAnnotationType().getSimpleName()));
+
+        boolean extendsRepository = ctType.isInterface()
+                && ctType.getSuperInterfaces().stream()
+                .anyMatch(si -> si.getSimpleName().endsWith("Repository"));
+
+        return hasAnnotation || extendsRepository;
+    }
+
+    private boolean isConfiguration(CtType<?> ctType) {
+        return ctType.getAnnotations().stream()
+                .anyMatch(a -> {
+                    String name = a.getAnnotationType().getSimpleName();
+                    return "Configuration".equals(name) || "SpringBootApplication".equals(name);
+                });
+    }
+
+    private boolean matchesPackage(CtType<?> ctType, String basePackage) {
+        if (basePackage == null || basePackage.isEmpty()) return true;
+        return ctType.getPackage().getQualifiedName().startsWith(basePackage);
+    }
+
+    // ========================= ANNOTATION/PATH HELPERS =========================
+
+    private String extractBasePath(CtType<?> controllerClass) {
+        return controllerClass.getAnnotations().stream()
+                .filter(a -> "RequestMapping".equals(a.getAnnotationType().getSimpleName()))
+                .findFirst()
+                .map(a -> {
+                    Object value = a.getValues().get("value");
+                    if (value == null) return "";
+                    return value.toString().replaceAll("[\"\\[\\]]", "");
+                })
+                .orElse("");
+    }
+
+    private String extractPath(CtAnnotation<?> annotation, String basePath) {
+        Object value = annotation.getValues().get("value");
+        if (value == null) value = annotation.getValues().get("path");
+
+        String path = "";
+        if (value != null) {
+            path = value.toString().replaceAll("[\"\\[\\]]", "");
         }
 
-        // Default if no methods found
-        if (operationSet.isEmpty()) {
-            operationSet.add("READ");
-            operationSet.add("WRITE");
-            operationSet.add("DELETE");
-        }
+        if (basePath.isEmpty()) return path.isEmpty() ? "/" : path;
+        return basePath + (path.isEmpty() ? "" : path);
+    }
 
-        operations.addAll(operationSet);
-        operations.sort(String::compareTo);
-        return operations;
+    private String extractExtendsClass(CtType<?> ctType) {
+        if (!ctType.isInterface()) return "None";
+        return ctType.getSuperInterfaces().stream()
+                .map(CtTypeReference::getQualifiedName)
+                .filter(name -> name.contains("Repository"))
+                .findFirst()
+                .orElse("None");
+    }
+
+    private String determineRepositoryType(String extendsClass) {
+        if (extendsClass.contains("ReactiveMongoRepository")) return "Reactive MongoDB";
+        if (extendsClass.contains("ReactiveCrudRepository")) return "Reactive JPA";
+        if (extendsClass.contains("MongoRepository")) return "MongoDB";
+        if (extendsClass.contains("JpaRepository") || extendsClass.contains("CrudRepository")) return "JPA";
+        return "Custom";
+    }
+
+    // ========================= FILTERING =========================
+
+    private boolean isJavaStandardLibrary(String className) {
+        return className.startsWith("java.")
+                || className.startsWith("javax.")
+                || className.startsWith("jakarta.")
+                || className.startsWith("org.springframework.")
+                || className.startsWith("lombok.");
+    }
+
+    private boolean isGetterOrSetter(String methodName) {
+        if (methodName == null || methodName.isEmpty()) return false;
+
+        if (methodName.startsWith("get") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))) return true;
+        if (methodName.startsWith("is") && methodName.length() > 2
+                && Character.isUpperCase(methodName.charAt(2))) return true;
+        if (methodName.startsWith("set") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))) return true;
+
+        switch (methodName) {
+            case "builder": case "build": case "toBuilder":
+            case "toString": case "hashCode": case "equals": case "canEqual":
+            case "of": case "valueOf":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // ========================= UTILITY =========================
+
+    private LineRange createLineRange(CtElement element) {
+        try {
+            return LineRange.builder()
+                    .start(element.getPosition().getLine())
+                    .end(element.getPosition().getEndLine())
+                    .build();
+        } catch (Exception e) {
+            return LineRange.builder().start(0).end(0).build();
+        }
     }
 
     private String extractSimpleName(String fullyQualifiedName) {
-        if (fullyQualifiedName == null || fullyQualifiedName.isEmpty()) {
-            return "";
-        }
+        if (fullyQualifiedName == null || fullyQualifiedName.isEmpty()) return "";
         int lastDot = fullyQualifiedName.lastIndexOf('.');
         return lastDot > 0 ? fullyQualifiedName.substring(lastDot + 1) : fullyQualifiedName;
     }
 
     private String camelCaseToSnakeCase(String input) {
-        if (input == null || input.isEmpty()) {
-            return "";
-        }
+        if (input == null || input.isEmpty()) return "";
         return input.replaceAll("([a-z])([A-Z])", "$1_$2").toLowerCase(Locale.ROOT);
     }
 }
