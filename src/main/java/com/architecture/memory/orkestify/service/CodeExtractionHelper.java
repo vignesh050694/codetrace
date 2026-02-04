@@ -65,8 +65,9 @@ public class CodeExtractionHelper {
                 String methodName = execRef.getSimpleName();
                 String callKey = className + "." + methodName;
 
-                // Avoid duplicate calls
-                if (!processedCalls.contains(callKey) && !isJavaStandardLibrary(className)) {
+                // Avoid duplicate calls, standard libraries, and getters/setters
+                if (!processedCalls.contains(callKey) && !isJavaStandardLibrary(className)
+                        && !isGetterOrSetter(methodName)) {
                     processedCalls.add(callKey);
 
                     List<ExternalCallInfo> nestedExternalCalls = new ArrayList<>();
@@ -155,7 +156,7 @@ public class CodeExtractionHelper {
     }
 
     /**
-     * Extract string value from Spoon expression (handles literals, field reads, concatenation)
+     * Extract string value from Spoon expression (handles literals, field reads, static constants, concatenation)
      */
     public String extractStringFromExpression(spoon.reflect.code.CtExpression<?> expression, Map<String, String> properties,
                                                Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
@@ -163,23 +164,15 @@ public class CodeExtractionHelper {
             return null;
         }
 
-        log.info("🔍 Extracting string from expression type: {}, value: {}, declaringClass: {}, valueFieldMapping size: {}",
-                expression.getClass().getSimpleName(),
-                expression.toString(),
-                declaringClass != null ? declaringClass.getQualifiedName() : "null",
-                valueFieldMapping != null ? valueFieldMapping.size() : "NULL");
-
         if (expression instanceof CtLiteral) {
             Object value = ((CtLiteral<?>) expression).getValue();
             if (value instanceof String) {
-                log.info("✓ Found literal string: {}", value);
                 return (String) value;
             }
         }
 
-        // Handle CtFieldRead (field access like marksTopic)
+        // Handle CtFieldRead (field access like marksTopic or TOPIC_CONSTANT)
         if (expression instanceof CtFieldRead) {
-            log.info("🎯 Detected CtFieldRead expression!");
             CtFieldRead<?> fieldRead = (CtFieldRead<?>) expression;
 
             try {
@@ -192,33 +185,42 @@ public class CodeExtractionHelper {
                         String fieldClassName = declaringType.getQualifiedName();
                         String qualifiedFieldName = fieldClassName + "." + fieldName;
 
-                        log.info("🎯 Found CtFieldRead: field={}, declaring class={}, qualified={}",
-                                fieldName, fieldClassName, qualifiedFieldName);
-                        log.info("🔍 Looking up in valueFieldMapping with {} entries", valueFieldMapping.size());
-
                         // Try exact match
                         String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
                         if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                            log.info("✅ SUCCESS! Resolved CtFieldRead {} to {}", qualifiedFieldName, resolvedValue);
                             return resolvedValue;
-                        } else {
-                            log.warn("❌ Failed exact match for: {}, resolved={}", qualifiedFieldName, resolvedValue);
                         }
 
                         // Try suffix match
-                        log.info("🔍 Trying suffix match for field: {}", fieldName);
                         for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
                             if (entry.getKey().endsWith("." + fieldName)) {
-                                log.info("✅ SUCCESS! Resolved CtFieldRead (by suffix) {} to {}", entry.getKey(), entry.getValue());
                                 return entry.getValue();
                             }
                         }
 
-                        log.warn("❌ No suffix match found for field: {}", fieldName);
+                        // Fallback: try to resolve static constant directly from AST
+                        try {
+                            CtField<?> fieldDecl = fieldRef.getFieldDeclaration();
+                            if (fieldDecl != null && fieldDecl.isStatic() && fieldDecl.isFinal()) {
+                                CtExpression<?> defaultExpr = fieldDecl.getDefaultExpression();
+                                if (defaultExpr instanceof CtLiteral) {
+                                    Object literalVal = ((CtLiteral<?>) defaultExpr).getValue();
+                                    if (literalVal instanceof String) {
+                                        String constValue = (String) literalVal;
+                                        if (constValue.contains("${")) {
+                                            constValue = propertyResolver.resolveProperty(constValue, properties);
+                                        }
+                                        return constValue;
+                                    }
+                                }
+                            }
+                        } catch (Exception ex) {
+                            log.debug("Could not resolve field declaration for: {}", qualifiedFieldName);
+                        }
                     }
                 }
             } catch (Exception e) {
-                log.error("❌ Error extracting field from CtFieldRead: {}", e.getMessage(), e);
+                log.debug("Error extracting field from CtFieldRead: {}", e.getMessage());
             }
         }
 
@@ -231,25 +233,21 @@ public class CodeExtractionHelper {
             }
         }
 
-        // Fallback: try generic field reference
+        // Fallback: try generic field reference by text
         String text = expression.toString();
         if (text != null && !text.isBlank()) {
             String fieldName = text.trim();
             String qualifiedFieldName = declaringClass != null ?
                     declaringClass.getQualifiedName() + "." + fieldName : fieldName;
 
-            log.debug("Attempting to resolve field reference: {} (qualified: {})", fieldName, qualifiedFieldName);
-
             String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
             if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                log.info("✓ Resolved field reference {} to {}", qualifiedFieldName, resolvedValue);
                 return resolvedValue;
             }
 
             // Try suffix match
             for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
                 if (entry.getKey().endsWith("." + fieldName)) {
-                    log.info("✓ Resolved field reference (by suffix match) {} to {}", entry.getKey(), entry.getValue());
                     return entry.getValue();
                 }
             }
@@ -443,5 +441,47 @@ public class CodeExtractionHelper {
         return className.startsWith("java.") ||
                 className.startsWith("javax.") ||
                 className.startsWith("jakarta.");
+    }
+
+    /**
+     * Checks if a method name follows getter/setter/builder/common-object patterns.
+     * These are boilerplate methods that add noise to the call graph.
+     */
+    private boolean isGetterOrSetter(String methodName) {
+        if (methodName == null || methodName.isEmpty()) return false;
+
+        // Standard getter: getName(), getXxx()
+        if (methodName.startsWith("get") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))) {
+            return true;
+        }
+
+        // Boolean getter: isActive(), isXxx()
+        if (methodName.startsWith("is") && methodName.length() > 2
+                && Character.isUpperCase(methodName.charAt(2))) {
+            return true;
+        }
+
+        // Setter: setName(), setXxx()
+        if (methodName.startsWith("set") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))) {
+            return true;
+        }
+
+        // Builder pattern and common Object methods
+        switch (methodName) {
+            case "builder":
+            case "build":
+            case "toBuilder":
+            case "toString":
+            case "hashCode":
+            case "equals":
+            case "canEqual":
+            case "of":
+            case "valueOf":
+                return true;
+            default:
+                return false;
+        }
     }
 }

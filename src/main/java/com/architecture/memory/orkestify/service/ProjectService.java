@@ -10,6 +10,7 @@ import com.architecture.memory.orkestify.repository.CodeAnalysisResultRepository
 import com.architecture.memory.orkestify.repository.ProjectRepository;
 import com.architecture.memory.orkestify.repository.UserRepository;
 import com.architecture.memory.orkestify.service.graph.GraphPersistenceService;
+import com.architecture.memory.orkestify.service.graph.GraphResolutionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -32,6 +33,7 @@ public class ProjectService {
     private final AsyncExternalCallResolverService asyncExternalCallResolverService;
     private final KafkaProducerConsumerResolver kafkaProducerConsumerResolver;
     private final GraphPersistenceService graphPersistenceService;
+    private final GraphResolutionService graphResolutionService;
 
     public ProjectResponse createProject(CreateProjectRequest request, String username) {
         log.info("Creating new project with name: {} for user: {}", request.getName(), username);
@@ -306,6 +308,15 @@ public class ProjectService {
         // Trigger Kafka producer-consumer resolution
         log.info("Triggering Kafka producer-consumer resolution for user: {}", user.getId());
         kafkaProducerConsumerResolver.resolveKafkaProducers(user.getId());
+
+        // Resolve cross-microservice external calls in Neo4j graph
+        try {
+            graphResolutionService.resolveExternalCalls(projectId);
+            graphResolutionService.resolveKafkaConnections(projectId);
+            log.info("Completed graph resolution for project: {}", projectId);
+        } catch (Exception resolveEx) {
+            log.error("Failed to resolve graph relationships: {}", resolveEx.getMessage(), resolveEx);
+        }
 
         return AnalysisJobResponse.builder()
                 .message(message)
