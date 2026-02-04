@@ -38,6 +38,9 @@ public class ShadowGraph {
     private String branchName;      // PR branch
     private String baseBranch;      // Base branch (main/master)
     private String prNumber;        // PR number (optional, for reference)
+    private Long githubCommentId;   // GitHub comment ID for updating existing comments
+    private String githubOwner;     // Repository owner (e.g., "user")
+    private String githubRepo;      // Repository name (e.g., "repo")
 
     private String status;          // PENDING, ANALYZING, COMPLETED, FAILED
     private String errorMessage;    // Error details if FAILED

@@ -24,4 +24,7 @@ public interface ShadowGraphRepository extends MongoRepository<ShadowGraph, Stri
     void deleteByProjectId(String projectId);
 
     long countByProjectIdAndStatus(String projectId, String status);
+
+    // Webhook support: find most recent shadow graph for a PR
+    Optional<ShadowGraph> findTopByProjectIdAndPrNumberOrderByCreatedAtDesc(String projectId, String prNumber);
 }

@@ -28,4 +28,7 @@ public interface ProjectRepository extends MongoRepository<Project, String> {
     Optional<Project> findByIdAndUserId(String id, String userId);
 
     boolean existsByIdAndUserId(String id, String userId);
+
+    // Webhook support: find project by GitHub repository URL
+    List<Project> findByGithubUrlsContaining(String githubUrl);
 }
