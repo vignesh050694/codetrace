@@ -244,25 +244,15 @@ public class KafkaAnalyzer {
      */
     public String extractTopicFromProducerCall(CtInvocation<?> invocation, Map<String, String> properties,
                                                 Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
-        // Try to extract topic from send() method arguments
         var arguments = invocation.getArguments();
-
-        log.info("🎯 Extracting Kafka topic from producer call, valueFieldMapping has {} entries, declaringClass: {}",
-                valueFieldMapping != null ? valueFieldMapping.size() : "NULL",
-                declaringClass != null ? declaringClass.getQualifiedName() : "null");
 
         // For send(topic, data) or send(topic, key, data)
         if (!arguments.isEmpty()) {
             var firstArg = arguments.get(0);
-            log.info("🎯 Kafka send() first argument type: {}, value: {}", firstArg.getClass().getSimpleName(), firstArg);
 
-            // Try to extract from field references or literals
             String extracted = extractionHelper.extractStringFromExpression(firstArg, properties, valueFieldMapping, declaringClass);
             if (extracted != null && !extracted.equals("<dynamic>")) {
-                log.info("✅ SUCCESS! Extracted Kafka topic from field reference: {}", extracted);
                 return extracted;
-            } else {
-                log.warn("❌ FAILED! Could not extract Kafka topic from field reference, got: {}", extracted);
             }
         }
 
@@ -338,7 +328,7 @@ public class KafkaAnalyzer {
     }
 
     /**
-     * Resolve topic placeholder - handles ${...}, $..., and literal formats
+     * Resolve topic placeholder - handles ${...}, #{...}, $..., and literal formats
      */
     private String resolveTopicPlaceholder(String topic, Map<String, String> properties) {
         if (topic == null || topic.isEmpty()) {
@@ -347,48 +337,70 @@ public class KafkaAnalyzer {
 
         // Case 1: Standard ${property.name} format
         if (topic.contains("${") && topic.contains("}")) {
-            log.debug("Topic contains standard placeholder: {}, attempting to resolve", topic);
             String resolvedTopic = propertyResolver.resolveProperty(topic, properties);
 
             if (resolvedTopic != null && !resolvedTopic.contains("$")) {
-                log.info("✅ Resolved Kafka listener topic: {} -> {}", topic, resolvedTopic);
+                log.debug("Resolved Kafka topic: {} -> {}", topic, resolvedTopic);
                 return resolvedTopic;
             } else {
-                log.warn("❌ Failed to resolve Kafka listener topic: {} (resolved to: {})", topic, resolvedTopic);
+                log.debug("Failed to resolve Kafka topic placeholder: {}", topic);
                 return "<unresolved:" + topic + ">";
             }
         }
 
-        // Case 2: Malformed $property.name format (missing braces)
+        // Case 2: SpEL #{...} expression (e.g., #{@topicConfig['user-topic']}, #{'${kafka.topic}'}
+        if (topic.contains("#{") && topic.contains("}")) {
+            // Try to extract ${...} inside SpEL
+            java.util.regex.Matcher dollarMatcher = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(topic);
+            if (dollarMatcher.find()) {
+                String placeholder = dollarMatcher.group(0);
+                String resolvedTopic = propertyResolver.resolveProperty(placeholder, properties);
+                if (resolvedTopic != null && !resolvedTopic.contains("$")) {
+                    return resolvedTopic;
+                }
+            }
+
+            // Try to extract quoted keys like ['key-name']
+            java.util.regex.Matcher keyMatcher = java.util.regex.Pattern.compile("\\['([^']+)'\\]").matcher(topic);
+            if (keyMatcher.find()) {
+                String key = keyMatcher.group(1);
+                String value = properties.get(key);
+                if (value != null) {
+                    return value;
+                }
+            }
+
+            return "<unresolved:" + topic + ">";
+        }
+
+        // Case 3: Malformed $property.name format (missing braces)
         if (topic.startsWith("$") && !topic.startsWith("${")) {
-            log.debug("Topic contains malformed placeholder (missing braces): {}", topic);
-
-            // Reconstruct proper placeholder format: $kafka.topic.name -> ${kafka.topic.name}
             String properPlaceholder = "${" + topic.substring(1) + "}";
-            log.debug("Reconstructed placeholder: {} -> {}", topic, properPlaceholder);
-
             String resolvedTopic = propertyResolver.resolveProperty(properPlaceholder, properties);
 
             if (resolvedTopic != null && !resolvedTopic.contains("$")) {
-                log.info("✅ Resolved Kafka listener topic (reconstructed): {} -> {}", topic, resolvedTopic);
                 return resolvedTopic;
-            } else {
-                log.warn("❌ Failed to resolve Kafka listener topic (reconstructed): {} (resolved to: {})",
-                         topic, resolvedTopic);
+            }
 
-                // Try direct property lookup as fallback
-                String propertyKey = topic.substring(1); // Remove leading $
-                String directValue = properties.get(propertyKey);
-                if (directValue != null) {
-                    log.info("✅ Resolved Kafka listener topic (direct lookup): {} -> {}", topic, directValue);
-                    return directValue;
-                }
+            // Try direct property lookup as fallback
+            String propertyKey = topic.substring(1);
+            String directValue = properties.get(propertyKey);
+            if (directValue != null) {
+                return directValue;
+            }
 
-                return "<unresolved:" + topic + ">";
+            return "<unresolved:" + topic + ">";
+        }
+
+        // Case 4: Plain string that might be a property key (no $ prefix but has dots)
+        if (topic.contains(".") && !topic.contains("/") && !topic.contains(" ")) {
+            String value = properties.get(topic);
+            if (value != null) {
+                return value;
             }
         }
 
-        // Case 3: Not a placeholder, return null to indicate no resolution needed
+        // Case 5: Not a placeholder, return null to indicate no resolution needed
         return null;
     }
 

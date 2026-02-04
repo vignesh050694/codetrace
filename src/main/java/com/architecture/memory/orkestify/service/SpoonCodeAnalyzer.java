@@ -191,13 +191,13 @@ public class SpoonCodeAnalyzer {
     }
 
     /**
-     * Build a mapping of field variable names to their resolved @Value property values
-     * Example: marksTopic -> "marks-topic"
+     * Build a mapping of field variable names to their resolved values.
+     * Captures both @Value annotated fields and static final String constants.
      */
     private Map<String, String> buildValueFieldMapping(CtModel model, String basePackage, Map<String, String> properties) {
         Map<String, String> fieldMapping = new HashMap<>();
 
-        log.info("Building @Value field mapping for package: {}", basePackage.isEmpty() ? "ALL" : basePackage);
+        log.info("Building field mapping for package: {}", basePackage.isEmpty() ? "ALL" : basePackage);
 
         model.getAllTypes().stream()
                 .filter(CtType::isClass)
@@ -211,30 +211,53 @@ public class SpoonCodeAnalyzer {
                                     Object valueObj = annotation.getValue("value");
                                     if (valueObj != null) {
                                         String placeholder = valueObj.toString();
-                                        // Remove quotes if present
                                         placeholder = placeholder.replaceAll("^\"|\"$", "");
 
-                                        // Resolve the placeholder
                                         String resolvedValue = propertyResolver.resolveProperty(placeholder, properties);
 
-                                        // Map field name to resolved value
                                         String fieldName = field.getSimpleName();
                                         String qualifiedFieldName = ctClass.getQualifiedName() + "." + fieldName;
 
                                         fieldMapping.put(qualifiedFieldName, resolvedValue);
-                                        log.info("✓ Mapped @Value field: {} = {} -> {}",
+                                        log.debug("Mapped @Value field: {} = {} -> {}",
                                                  qualifiedFieldName, placeholder, resolvedValue);
                                     }
                                 } catch (Exception e) {
-                                    log.warn("✗ Could not resolve @Value for field {}.{}: {}",
+                                    log.warn("Could not resolve @Value for field {}.{}: {}",
                                              ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
                                 }
                             }
                         });
+
+                        // Capture static final String constants (e.g., TOPIC_NAME = "user-events")
+                        try {
+                            if (field.isStatic() && field.isFinal()
+                                    && field.getType() != null
+                                    && "String".equals(field.getType().getSimpleName())) {
+                                CtExpression<?> defaultExpr = field.getDefaultExpression();
+                                if (defaultExpr instanceof CtLiteral) {
+                                    Object literalValue = ((CtLiteral<?>) defaultExpr).getValue();
+                                    if (literalValue instanceof String) {
+                                        String qualifiedFieldName = ctClass.getQualifiedName() + "." + field.getSimpleName();
+                                        String value = (String) literalValue;
+
+                                        if (value.contains("${")) {
+                                            value = propertyResolver.resolveProperty(value, properties);
+                                        }
+
+                                        fieldMapping.put(qualifiedFieldName, value);
+                                        log.debug("Mapped static constant: {} = {}", qualifiedFieldName, value);
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            log.debug("Could not extract static constant for {}.{}: {}",
+                                    ctClass.getQualifiedName(), field.getSimpleName(), e.getMessage());
+                        }
                     });
                 });
 
-        log.info("Built @Value field mapping with {} entries", fieldMapping.size());
+        log.info("Built field mapping with {} entries", fieldMapping.size());
         return fieldMapping;
     }
 
@@ -410,8 +433,9 @@ public class SpoonCodeAnalyzer {
                 String methodName = execRef.getSimpleName();
                 String callKey = className + "." + methodName;
 
-                // Avoid duplicate calls
-                if (!processedCalls.contains(callKey) && !isJavaStandardLibrary(className)) {
+                // Avoid duplicate calls, standard libraries, and getters/setters
+                if (!processedCalls.contains(callKey) && !isJavaStandardLibrary(className)
+                        && !isGetterOrSetter(methodName)) {
                     processedCalls.add(callKey);
 
                     List<ExternalCallInfo> nestedExternalCalls = new ArrayList<>();
@@ -632,6 +656,48 @@ public class SpoonCodeAnalyzer {
                 className.startsWith("jakarta.") ||
                 className.startsWith("org.springframework.") ||
                 className.startsWith("lombok.");
+    }
+
+    /**
+     * Checks if a method name follows getter/setter/builder/common-object patterns.
+     * These are boilerplate methods that add noise to the call graph.
+     */
+    private boolean isGetterOrSetter(String methodName) {
+        if (methodName == null || methodName.isEmpty()) return false;
+
+        // Standard getter: getName(), getXxx()
+        if (methodName.startsWith("get") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))) {
+            return true;
+        }
+
+        // Boolean getter: isActive(), isXxx()
+        if (methodName.startsWith("is") && methodName.length() > 2
+                && Character.isUpperCase(methodName.charAt(2))) {
+            return true;
+        }
+
+        // Setter: setName(), setXxx()
+        if (methodName.startsWith("set") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))) {
+            return true;
+        }
+
+        // Builder pattern and common Object methods
+        switch (methodName) {
+            case "builder":
+            case "build":
+            case "toBuilder":
+            case "toString":
+            case "hashCode":
+            case "equals":
+            case "canEqual":
+            case "of":
+            case "valueOf":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private ApplicationInfo extractApplicationInfo(CtModel model, Path repositoryPath) {
@@ -875,24 +941,15 @@ public class SpoonCodeAnalyzer {
             return null;
         }
 
-        // Log what type of expression we're processing
-        log.info("🔍 Extracting string from expression type: {}, value: {}, declaringClass: {}, valueFieldMapping size: {}",
-                  expression.getClass().getSimpleName(),
-                  expression.toString(),
-                  declaringClass != null ? declaringClass.getQualifiedName() : "null",
-                  valueFieldMapping != null ? valueFieldMapping.size() : "NULL");
-
         if (expression instanceof CtLiteral) {
             Object value = ((CtLiteral<?>) expression).getValue();
             if (value instanceof String) {
-                log.info("✓ Found literal string: {}", value);
                 return (String) value;
             }
         }
 
-        // Handle CtFieldRead (field access like marksTopic)
+        // Handle CtFieldRead (field access like marksTopic or TOPIC_CONSTANT)
         if (expression instanceof CtFieldRead) {
-            log.info("🎯 Detected CtFieldRead expression!");
             CtFieldRead<?> fieldRead = (CtFieldRead<?>) expression;
 
             try {
@@ -905,33 +962,45 @@ public class SpoonCodeAnalyzer {
                         String fieldClassName = declaringType.getQualifiedName();
                         String qualifiedFieldName = fieldClassName + "." + fieldName;
 
-                        log.info("🎯 Found CtFieldRead: field={}, declaring class={}, qualified={}",
-                                 fieldName, fieldClassName, qualifiedFieldName);
-                        log.info("🔍 Looking up in valueFieldMapping with {} entries", valueFieldMapping.size());
+                        log.debug("CtFieldRead: field={}, qualified={}", fieldName, qualifiedFieldName);
 
-                        // Try exact match
+                        // Try exact match in valueFieldMapping
                         String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
                         if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                            log.info("✅ SUCCESS! Resolved CtFieldRead {} to {}", qualifiedFieldName, resolvedValue);
                             return resolvedValue;
-                        } else {
-                            log.warn("❌ Failed exact match for: {}, resolved={}", qualifiedFieldName, resolvedValue);
                         }
 
                         // Try suffix match
-                        log.info("🔍 Trying suffix match for field: {}", fieldName);
                         for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
                             if (entry.getKey().endsWith("." + fieldName)) {
-                                log.info("✅ SUCCESS! Resolved CtFieldRead (by suffix) {} to {}", entry.getKey(), entry.getValue());
                                 return entry.getValue();
                             }
                         }
 
-                        log.warn("❌ No suffix match found for field: {}", fieldName);
+                        // Fallback: try to resolve static constant directly from AST
+                        try {
+                            CtField<?> fieldDecl = fieldRef.getFieldDeclaration();
+                            if (fieldDecl != null && fieldDecl.isStatic() && fieldDecl.isFinal()) {
+                                CtExpression<?> defaultExpr = fieldDecl.getDefaultExpression();
+                                if (defaultExpr instanceof CtLiteral) {
+                                    Object literalVal = ((CtLiteral<?>) defaultExpr).getValue();
+                                    if (literalVal instanceof String) {
+                                        String constValue = (String) literalVal;
+                                        if (constValue.contains("${")) {
+                                            constValue = propertyResolver.resolveProperty(constValue, properties);
+                                        }
+                                        log.debug("Resolved static constant {} = {}", qualifiedFieldName, constValue);
+                                        return constValue;
+                                    }
+                                }
+                            }
+                        } catch (Exception ex) {
+                            log.debug("Could not resolve field declaration for: {}", qualifiedFieldName);
+                        }
                     }
                 }
             } catch (Exception e) {
-                log.error("❌ Error extracting field from CtFieldRead: {}", e.getMessage(), e);
+                log.debug("Error extracting field from CtFieldRead: {}", e.getMessage());
             }
         }
 
@@ -959,7 +1028,6 @@ public class SpoonCodeAnalyzer {
             // Try to resolve from valueFieldMapping with qualified name
             String resolvedValue = valueFieldMapping.get(qualifiedFieldName);
             if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                log.info("✓ Resolved field reference {} to {}", qualifiedFieldName, resolvedValue);
                 return resolvedValue;
             }
 
@@ -967,7 +1035,6 @@ public class SpoonCodeAnalyzer {
             if (resolvedValue != null && propertyResolver.hasPlaceholders(resolvedValue)) {
                 String fullyResolved = propertyResolver.resolveProperty(resolvedValue, properties);
                 if (fullyResolved != null && !fullyResolved.startsWith("${")) {
-                    log.info("✓ Fully resolved field reference {} to {}", qualifiedFieldName, fullyResolved);
                     return fullyResolved;
                 }
             }
@@ -975,30 +1042,17 @@ public class SpoonCodeAnalyzer {
             // Try without the declaring class prefix (for same-class fields)
             resolvedValue = valueFieldMapping.get(fieldName);
             if (resolvedValue != null && !resolvedValue.startsWith("${")) {
-                log.info("✓ Resolved field reference (simple name) {} to {}", fieldName, resolvedValue);
                 return resolvedValue;
             }
 
             // Final fallback: search for any field ending with this name
             for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
                 if (entry.getKey().endsWith("." + fieldName)) {
-                    log.info("✓ Resolved field reference (by suffix match) {} to {}", entry.getKey(), entry.getValue());
                     return entry.getValue();
                 }
             }
 
-            // Log failure with all available mappings for debugging
-            log.warn("✗ Could not resolve field reference: '{}' (qualified: '{}')", fieldName, qualifiedFieldName);
-            log.warn("   Tried: exact match '{}', simple name '{}', and suffix matches", qualifiedFieldName, fieldName);
-            if (!valueFieldMapping.isEmpty()) {
-                log.warn("   Available @Value field mappings ({} total):", valueFieldMapping.size());
-                valueFieldMapping.forEach((key, value) ->
-                    log.warn("     - {} = {}", key, value)
-                );
-            } else {
-                log.warn("   No @Value field mappings available!");
-            }
-
+            log.debug("Could not resolve field reference: '{}'", fieldName);
             return "<dynamic>";
         }
         return null;
