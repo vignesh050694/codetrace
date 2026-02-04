@@ -84,7 +84,7 @@ public class ServiceDetailResponse {
         private String url;
         private String httpMethod;
         private boolean resolved;
-        private Integer lineNumber;
+        private String lineNumber;
     }
 
     @Data

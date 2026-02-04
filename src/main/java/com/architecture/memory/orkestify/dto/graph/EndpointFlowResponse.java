@@ -92,7 +92,7 @@ public class EndpointFlowResponse {
         private boolean resolved;
         private String targetService;
         private String targetEndpoint;
-        private Integer lineNumber;
+        private String lineNumber;
     }
 
     @Data

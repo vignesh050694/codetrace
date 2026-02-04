@@ -85,7 +85,7 @@ public class ControllerDetailResponse {
         private String httpMethod;
         private boolean resolved;
         private String targetService;
-        private Integer lineNumber;
+        private String lineNumber;
     }
 
     @Data
