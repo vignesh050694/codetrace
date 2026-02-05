@@ -676,7 +676,7 @@ public class GraphVisualizationService {
 
     /**
      * Get a node by its ID with all related nodes and edges for visualization.
-     * Returns the node and its immediate neighbors (both incoming and outgoing relationships).
+     * Returns the node with complete depth traversal - all downstream dependencies are included.
      */
     public GraphVisualizationResponse getNodeGraphById(String projectId, String nodeId) {
         log.info("Getting node graph by ID for project: {}, nodeId: {}", projectId, nodeId);
@@ -686,7 +686,7 @@ public class GraphVisualizationService {
         Set<String> addedNodeIds = new HashSet<>();
         Set<String> addedEdgeIds = new HashSet<>();
 
-        // Try to find the node in each repository and build the graph
+        // Try to find the node in each repository and build the full graph
         // First, try Application
         Optional<ApplicationNode> appOpt = applicationNodeRepository.findById(nodeId);
         if (appOpt.isPresent()) {
@@ -694,7 +694,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(app.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildApplicationNodeGraph(app, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildApplicationNodeGraphFull(app, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try Controller
@@ -704,7 +705,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(controller.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildControllerNodeGraph(controller, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildControllerNodeGraphFull(controller, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try Endpoint
@@ -714,7 +716,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(endpoint.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildEndpointNodeGraph(endpoint, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildEndpointNodeGraphFull(endpoint, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try Service
@@ -724,7 +727,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(service.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildServiceNodeGraph(service, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildServiceNodeGraphFull(service, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try Method
@@ -734,7 +738,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(method.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildMethodNodeGraph(method, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildMethodNodeGraphFull(method, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try KafkaTopic
@@ -744,7 +749,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(topic.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildKafkaTopicNodeGraph(topic, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildKafkaTopicNodeGraphFull(topic, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try KafkaListener
@@ -754,7 +760,8 @@ public class GraphVisualizationService {
             if (!projectId.equals(listener.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildKafkaListenerNodeGraph(listener, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildKafkaListenerNodeGraphFull(listener, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Try Repository
@@ -764,12 +771,34 @@ public class GraphVisualizationService {
             if (!projectId.equals(repo.getProjectId())) {
                 return buildEmptyResponse(projectId);
             }
-            return buildRepositoryNodeGraph(repo, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            buildRepositoryNodeGraphFull(repo, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            return buildFinalResponse(nodes, edges, projectId);
         }
 
         // Node not found
         log.warn("Node not found with ID: {}", nodeId);
         return buildEmptyResponse(projectId);
+    }
+
+    private GraphVisualizationResponse buildFinalResponse(List<GraphNode> nodes, List<GraphEdge> edges, String projectId) {
+        // Calculate actual depth from the graph
+        int depth = calculateGraphDepth(nodes, edges);
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, depth);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private int calculateGraphDepth(List<GraphNode> nodes, List<GraphEdge> edges) {
+        if (nodes.isEmpty()) return 0;
+        // Simple heuristic: count unique node types as a proxy for depth
+        Set<String> types = new HashSet<>();
+        for (GraphNode node : nodes) {
+            types.add(node.getType());
+        }
+        return types.size();
     }
 
     private GraphVisualizationResponse buildEmptyResponse(String projectId) {
@@ -780,48 +809,83 @@ public class GraphVisualizationService {
                 .build();
     }
 
-    private GraphVisualizationResponse buildApplicationNodeGraph(ApplicationNode app, String projectId,
-                                                                  List<GraphNode> nodes, List<GraphEdge> edges,
-                                                                  Set<String> addedNodeIds, Set<String> addedEdgeIds) {
-        // Add the application node
+    // ==================== Full Depth Graph Building Methods ====================
+
+    /**
+     * Build complete graph for an Application node with full depth traversal.
+     * Includes: Controllers -> Endpoints -> Methods -> called Methods/External calls/Kafka
+     *           Services -> Methods -> called Methods/External calls/Kafka
+     *           Repositories -> Database Tables
+     *           KafkaListeners -> ListenerMethods -> Topics
+     */
+    private void buildApplicationNodeGraphFull(ApplicationNode app, String projectId,
+                                               List<GraphNode> nodes, List<GraphEdge> edges,
+                                               Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertApplicationToGraphNode(app));
 
-        // Get related nodes - controllers, services, repositories, kafka listeners
-        List<ControllerNode> controllers = controllerNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        // Get and process controllers with full depth
+        List<ControllerNode> controllers = controllerNodeRepository.findByProjectIdWithEndpoints(projectId);
         for (ControllerNode ctrl : controllers) {
-            addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
-            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), ctrl.getId(), "CONTAINS_CONTROLLER"));
+            if (app.getAppKey().equals(ctrl.getAppKey())) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), ctrl.getId(), "CONTAINS_CONTROLLER"));
+
+                // Process endpoints under this controller
+                if (ctrl.getEndpoints() != null) {
+                    for (EndpointNode endpoint : ctrl.getEndpoints()) {
+                        processEndpointFull(endpoint, ctrl.getId(), projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+                    }
+                }
+            }
         }
 
-        List<ServiceNode> services = serviceNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        // Get and process services with full depth
+        List<ServiceNode> services = serviceNodeRepository.findByProjectIdWithMethods(projectId);
         for (ServiceNode svc : services) {
-            addNodeIfNotExists(nodes, addedNodeIds, convertServiceToGraphNode(svc));
-            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), svc.getId(), "CONTAINS_SERVICE"));
+            if (app.getAppKey().equals(svc.getAppKey())) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertServiceToGraphNode(svc));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), svc.getId(), "CONTAINS_SERVICE"));
+
+                // Process methods under this service
+                if (svc.getMethods() != null) {
+                    for (MethodNode method : svc.getMethods()) {
+                        processMethodFull(method, svc.getId(), "HAS_METHOD", projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+                    }
+                }
+            }
         }
 
-        List<RepositoryClassNode> repos = repositoryClassNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        // Get and process repositories with database tables
+        List<RepositoryClassNode> repos = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
         for (RepositoryClassNode repo : repos) {
-            addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
-            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), repo.getId(), "CONTAINS_REPOSITORY"));
+            if (app.getAppKey().equals(repo.getAppKey())) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), repo.getId(), "CONTAINS_REPOSITORY"));
+
+                if (repo.getAccessesTables() != null) {
+                    for (DatabaseTableNode table : repo.getAccessesTables()) {
+                        addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
+                    }
+                }
+            }
         }
 
-        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        // Get and process kafka listeners with full depth
+        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdWithListenerMethods(projectId);
         for (KafkaListenerNode listener : listeners) {
-            addNodeIfNotExists(nodes, addedNodeIds, convertKafkaListenerToGraphNode(listener));
-            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), listener.getId(), "CONTAINS_KAFKA_LISTENER"));
+            if (app.getAppKey().equals(listener.getAppKey())) {
+                processKafkaListenerFull(listener, app.getId(), projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildControllerNodeGraph(ControllerNode controller, String projectId,
-                                                                 List<GraphNode> nodes, List<GraphEdge> edges,
-                                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for a Controller node with full depth traversal.
+     */
+    private void buildControllerNodeGraphFull(ControllerNode controller, String projectId,
+                                              List<GraphNode> nodes, List<GraphEdge> edges,
+                                              Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(controller));
 
         // Add parent application
@@ -831,25 +895,20 @@ public class GraphVisualizationService {
             addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), controller.getId(), "CONTAINS_CONTROLLER"));
         });
 
-        // Add endpoints
+        // Process endpoints with full depth
         if (controller.getEndpoints() != null) {
             for (EndpointNode endpoint : controller.getEndpoints()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(controller.getId(), endpoint.getId(), "HAS_ENDPOINT"));
+                processEndpointFull(endpoint, controller.getId(), projectId, nodes, edges, addedNodeIds, addedEdgeIds);
             }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildEndpointNodeGraph(EndpointNode endpoint, String projectId,
-                                                               List<GraphNode> nodes, List<GraphEdge> edges,
-                                                               Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for an Endpoint node with full depth traversal.
+     */
+    private void buildEndpointNodeGraphFull(EndpointNode endpoint, String projectId,
+                                            List<GraphNode> nodes, List<GraphEdge> edges,
+                                            Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
 
         // Add parent controller
@@ -861,19 +920,17 @@ public class GraphVisualizationService {
             });
         }
 
-        // Add called methods
+        // Process called methods recursively
         if (endpoint.getCalls() != null) {
             for (MethodNode method : endpoint.getCalls()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), method.getId(), "CALLS"));
+                processMethodFull(method, endpoint.getId(), "CALLS", projectId, nodes, edges, addedNodeIds, addedEdgeIds);
             }
         }
 
         // Add external calls
         if (endpoint.getExternalCalls() != null) {
             for (ExternalCallNode extCall : endpoint.getExternalCalls()) {
-                GraphNode extCallNode = convertExternalCallToGraphNode(extCall);
-                addNodeIfNotExists(nodes, addedNodeIds, extCallNode);
+                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
             }
         }
@@ -885,18 +942,14 @@ public class GraphVisualizationService {
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), topic.getId(), "PRODUCES_TO"));
             }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildServiceNodeGraph(ServiceNode service, String projectId,
-                                                              List<GraphNode> nodes, List<GraphEdge> edges,
-                                                              Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for a Service node with full depth traversal.
+     */
+    private void buildServiceNodeGraphFull(ServiceNode service, String projectId,
+                                           List<GraphNode> nodes, List<GraphEdge> edges,
+                                           Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertServiceToGraphNode(service));
 
         // Add parent application
@@ -906,25 +959,20 @@ public class GraphVisualizationService {
             addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), service.getId(), "CONTAINS_SERVICE"));
         });
 
-        // Add methods
+        // Process methods with full depth
         if (service.getMethods() != null) {
             for (MethodNode method : service.getMethods()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(service.getId(), method.getId(), "HAS_METHOD"));
+                processMethodFull(method, service.getId(), "HAS_METHOD", projectId, nodes, edges, addedNodeIds, addedEdgeIds);
             }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildMethodNodeGraph(MethodNode method, String projectId,
-                                                             List<GraphNode> nodes, List<GraphEdge> edges,
-                                                             Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for a Method node with full depth traversal.
+     */
+    private void buildMethodNodeGraphFull(MethodNode method, String projectId,
+                                          List<GraphNode> nodes, List<GraphEdge> edges,
+                                          Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
 
         // Add parent service if method belongs to one
@@ -936,32 +984,29 @@ public class GraphVisualizationService {
             });
         }
 
-        // Add called methods
+        // Process called methods recursively
         if (method.getCalls() != null) {
             for (MethodNode calledMethod : method.getCalls()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(calledMethod));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), calledMethod.getId(), "CALLS"));
+                processMethodFull(calledMethod, method.getId(), "CALLS", projectId, nodes, edges, addedNodeIds, addedEdgeIds);
             }
         }
 
         // Add callers (methods that call this method)
-        List<MethodNode> callers = methodNodeRepository.findCallersOf(projectId, method.getSignature());
-        for (MethodNode caller : callers) {
-            addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(caller));
-            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(caller.getId(), method.getId(), "CALLS"));
+        if (method.getSignature() != null) {
+            List<MethodNode> callers = methodNodeRepository.findCallersOf(projectId, method.getSignature());
+            for (MethodNode caller : callers) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(caller));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(caller.getId(), method.getId(), "CALLS"));
+            }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildKafkaTopicNodeGraph(KafkaTopicNode topic, String projectId,
-                                                                 List<GraphNode> nodes, List<GraphEdge> edges,
-                                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for a KafkaTopic node with full depth traversal.
+     */
+    private void buildKafkaTopicNodeGraphFull(KafkaTopicNode topic, String projectId,
+                                              List<GraphNode> nodes, List<GraphEdge> edges,
+                                              Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
 
         // Find producers - endpoints that produce to this topic
@@ -986,21 +1031,10 @@ public class GraphVisualizationService {
                     if (method.getConsumesFromTopics() != null) {
                         for (KafkaTopicNode t : method.getConsumesFromTopics()) {
                             if (t.getId().equals(topic.getId())) {
-                                GraphNode consumerNode = GraphNode.builder()
-                                        .id(method.getId())
-                                        .label(listener.getClassName() + "." + method.getMethodName())
-                                        .type("KafkaListenerMethod")
-                                        .group(listener.getPackageName())
-                                        .properties(Map.of(
-                                                "className", listener.getClassName(),
-                                                "methodName", method.getMethodName(),
-                                                "groupId", method.getGroupId() != null ? method.getGroupId() : ""))
-                                        .style(NodeStyle.builder()
-                                                .color("#F44336")
-                                                .shape("rectangle")
-                                                .icon("listener")
-                                                .build())
-                                        .build();
+                                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaListenerToGraphNode(listener));
+                                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(listener.getId(), method.getId(), "HAS_LISTENER_METHOD"));
+
+                                GraphNode consumerNode = convertKafkaListenerMethodToGraphNode(method, listener);
                                 addNodeIfNotExists(nodes, addedNodeIds, consumerNode);
                                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(topic.getId(), method.getId(), "CONSUMED_BY"));
                                 break;
@@ -1010,18 +1044,14 @@ public class GraphVisualizationService {
                 }
             }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildKafkaListenerNodeGraph(KafkaListenerNode listener, String projectId,
-                                                                    List<GraphNode> nodes, List<GraphEdge> edges,
-                                                                    Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for a KafkaListener node with full depth traversal.
+     */
+    private void buildKafkaListenerNodeGraphFull(KafkaListenerNode listener, String projectId,
+                                                 List<GraphNode> nodes, List<GraphEdge> edges,
+                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertKafkaListenerToGraphNode(listener));
 
         // Add parent application
@@ -1034,21 +1064,7 @@ public class GraphVisualizationService {
         // Add listener methods and their topics
         if (listener.getListenerMethods() != null) {
             for (KafkaListenerMethodNode method : listener.getListenerMethods()) {
-                GraphNode methodNode = GraphNode.builder()
-                        .id(method.getId())
-                        .label(method.getMethodName())
-                        .type("KafkaListenerMethod")
-                        .group(listener.getClassName())
-                        .properties(Map.of(
-                                "methodName", method.getMethodName(),
-                                "signature", method.getSignature() != null ? method.getSignature() : "",
-                                "groupId", method.getGroupId() != null ? method.getGroupId() : ""))
-                        .style(NodeStyle.builder()
-                                .color("#F44336")
-                                .shape("rectangle")
-                                .icon("listener-method")
-                                .build())
-                        .build();
+                GraphNode methodNode = convertKafkaListenerMethodToGraphNode(method, listener);
                 addNodeIfNotExists(nodes, addedNodeIds, methodNode);
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(listener.getId(), method.getId(), "HAS_LISTENER_METHOD"));
 
@@ -1061,18 +1077,14 @@ public class GraphVisualizationService {
                 }
             }
         }
-
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
-                .build();
     }
 
-    private GraphVisualizationResponse buildRepositoryNodeGraph(RepositoryClassNode repo, String projectId,
-                                                                 List<GraphNode> nodes, List<GraphEdge> edges,
-                                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+    /**
+     * Build complete graph for a Repository node with full depth traversal.
+     */
+    private void buildRepositoryNodeGraphFull(RepositoryClassNode repo, String projectId,
+                                              List<GraphNode> nodes, List<GraphEdge> edges,
+                                              Set<String> addedNodeIds, Set<String> addedEdgeIds) {
         addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
 
         // Add parent application
@@ -1089,12 +1101,122 @@ public class GraphVisualizationService {
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
             }
         }
+    }
 
-        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
-        return GraphVisualizationResponse.builder()
-                .nodes(nodes)
-                .edges(edges)
-                .metadata(metadata)
+    // ==================== Recursive Processing Helpers ====================
+
+    /**
+     * Process an endpoint and all its downstream dependencies recursively.
+     */
+    private void processEndpointFull(EndpointNode endpoint, String parentId, String projectId,
+                                     List<GraphNode> nodes, List<GraphEdge> edges,
+                                     Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(parentId, endpoint.getId(), "HAS_ENDPOINT"));
+
+        // Process called methods recursively
+        if (endpoint.getCalls() != null) {
+            for (MethodNode method : endpoint.getCalls()) {
+                processMethodFull(method, endpoint.getId(), "CALLS", projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            }
+        }
+
+        // Add external calls
+        if (endpoint.getExternalCalls() != null) {
+            for (ExternalCallNode extCall : endpoint.getExternalCalls()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+            }
+        }
+
+        // Add Kafka topics
+        if (endpoint.getProducesToTopics() != null) {
+            for (KafkaTopicNode topic : endpoint.getProducesToTopics()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), topic.getId(), "PRODUCES_TO"));
+            }
+        }
+    }
+
+    /**
+     * Process a method and all its downstream dependencies recursively.
+     * Uses addedNodeIds to prevent infinite loops from circular dependencies.
+     */
+    private void processMethodFull(MethodNode method, String parentId, String edgeType, String projectId,
+                                   List<GraphNode> nodes, List<GraphEdge> edges,
+                                   Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        // Check if already processed to avoid infinite loops
+        boolean isNewNode = !addedNodeIds.contains(method.getId());
+
+        addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
+        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(parentId, method.getId(), edgeType));
+
+        // Only process children if this is a new node (not already processed)
+        if (isNewNode && method.getCalls() != null) {
+            for (MethodNode calledMethod : method.getCalls()) {
+                processMethodFull(calledMethod, method.getId(), "CALLS", projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+            }
+        }
+
+        // Add external calls from this method
+        if (isNewNode && method.getExternalCalls() != null) {
+            for (ExternalCallNode extCall : method.getExternalCalls()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+            }
+        }
+
+        // Add Kafka topics produced by this method
+        if (isNewNode && method.getProducesToTopics() != null) {
+            for (KafkaTopicNode topic : method.getProducesToTopics()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), topic.getId(), "PRODUCES_TO"));
+            }
+        }
+    }
+
+    /**
+     * Process a Kafka listener and all its downstream dependencies.
+     */
+    private void processKafkaListenerFull(KafkaListenerNode listener, String parentId, String projectId,
+                                          List<GraphNode> nodes, List<GraphEdge> edges,
+                                          Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertKafkaListenerToGraphNode(listener));
+        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(parentId, listener.getId(), "CONTAINS_KAFKA_LISTENER"));
+
+        if (listener.getListenerMethods() != null) {
+            for (KafkaListenerMethodNode method : listener.getListenerMethods()) {
+                GraphNode methodNode = convertKafkaListenerMethodToGraphNode(method, listener);
+                addNodeIfNotExists(nodes, addedNodeIds, methodNode);
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(listener.getId(), method.getId(), "HAS_LISTENER_METHOD"));
+
+                // Add consumed topics
+                if (method.getConsumesFromTopics() != null) {
+                    for (KafkaTopicNode topic : method.getConsumesFromTopics()) {
+                        addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(topic.getId(), method.getId(), "CONSUMED_BY"));
+                    }
+                }
+            }
+        }
+    }
+
+    private GraphNode convertKafkaListenerMethodToGraphNode(KafkaListenerMethodNode method, KafkaListenerNode listener) {
+        return GraphNode.builder()
+                .id(method.getId())
+                .label(listener.getClassName() + "." + method.getMethodName())
+                .type("KafkaListenerMethod")
+                .group(listener.getPackageName())
+                .properties(Map.of(
+                        "className", listener.getClassName(),
+                        "methodName", method.getMethodName(),
+                        "signature", method.getSignature() != null ? method.getSignature() : "",
+                        "groupId", method.getGroupId() != null ? method.getGroupId() : ""))
+                .style(NodeStyle.builder()
+                        .color("#F44336")
+                        .shape("rectangle")
+                        .icon("listener-method")
+                        .build())
                 .build();
     }
 
