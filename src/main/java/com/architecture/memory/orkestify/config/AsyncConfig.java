@@ -2,10 +2,10 @@ package com.architecture.memory.orkestify.config;
 
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 @Configuration
 @EnableAsync
+@EnableScheduling
 public class AsyncConfig {
-    // Async configuration is enabled
-    // Methods annotated with @Async will be executed in a thread pool
 }

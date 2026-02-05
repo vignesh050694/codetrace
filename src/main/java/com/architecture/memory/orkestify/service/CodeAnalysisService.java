@@ -22,6 +22,51 @@ public class CodeAnalysisService {
     private final SpoonCodeAnalyzer spoonCodeAnalyzer;
     private static final String TEMP_CLONE_DIR = System.getProperty("java.io.tmpdir") + "/orkestify-analysis/";
 
+    /**
+     * Analyze a specific branch of a repository.
+     * Used by shadow graph processing to analyze PR branches.
+     */
+    public List<CodeAnalysisResponse> analyzeRepositoryBranch(String projectId, String repositoryUrl, String branchName) {
+        log.info("Starting code analysis for repository: {} branch: {}", repositoryUrl, branchName);
+
+        String repoName = extractRepoName(repositoryUrl);
+        Path clonePath = Paths.get(TEMP_CLONE_DIR, repoName);
+
+        try {
+            if (Files.exists(clonePath)) {
+                log.info("Cleaning up existing directory: {}", clonePath);
+                cleanupDirectory(clonePath);
+            }
+
+            log.info("Cloning repository branch {} to: {}", branchName, clonePath);
+            boolean cloneSuccess = cloneRepositoryBranch(repositoryUrl, branchName, clonePath);
+
+            if (!cloneSuccess) {
+                throw new RuntimeException("Failed to clone repository branch: " + repositoryUrl + " @ " + branchName);
+            }
+
+            log.info("Analyzing code structure with Spoon...");
+            List<CodeAnalysisResponse> analyses = spoonCodeAnalyzer.analyzeCode(clonePath, projectId, repositoryUrl);
+
+            log.info("Code analysis completed for: {} branch: {}. Found {} application(s)",
+                    repositoryUrl, branchName, analyses.size());
+            return analyses;
+
+        } catch (Exception e) {
+            log.error("Error during code analysis: {} branch: {}", repositoryUrl, branchName, e);
+            throw new RuntimeException("Code analysis failed: " + e.getMessage(), e);
+        } finally {
+            try {
+                if (Files.exists(clonePath)) {
+                    cleanupDirectory(clonePath);
+                    log.info("Cleaned up cloned directory: {}", clonePath);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to cleanup directory: {}", clonePath, e);
+            }
+        }
+    }
+
     public List<CodeAnalysisResponse> analyzeRepository(String projectId, String repositoryUrl) {
         log.info("Starting code analysis for repository: {}", repositoryUrl);
 
@@ -64,6 +109,34 @@ public class CodeAnalysisService {
             } catch (Exception e) {
                 log.warn("Failed to cleanup directory: {}", clonePath, e);
             }
+        }
+    }
+
+    private boolean cloneRepositoryBranch(String repositoryUrl, String branchName, Path targetPath) {
+        try {
+            Files.createDirectories(targetPath.getParent());
+
+            ProcessBuilder processBuilder = new ProcessBuilder(
+                    "git", "clone", "--depth", "1", "--branch", branchName, repositoryUrl, targetPath.toString()
+            );
+            processBuilder.redirectErrorStream(true);
+
+            Process process = processBuilder.start();
+            int exitCode = process.waitFor();
+
+            if (exitCode == 0) {
+                log.info("Successfully cloned repository branch: {} @ {}", repositoryUrl, branchName);
+                return true;
+            } else {
+                log.error("Git clone failed with exit code: {} for branch: {}", exitCode, branchName);
+                return false;
+            }
+        } catch (IOException | InterruptedException e) {
+            log.error("Error cloning repository branch: {} @ {}", repositoryUrl, branchName, e);
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return false;
         }
     }
 
