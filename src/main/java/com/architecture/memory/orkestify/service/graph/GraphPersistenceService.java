@@ -82,10 +82,11 @@ public class GraphPersistenceService {
         applicationNode.getRepositories().addAll(repositoryNodes);
 
         Map<String, MethodNode> serviceMethodIndex = new HashMap<>();
-        Set<ServiceNode> serviceNodes = buildServiceNodes(analysis.getServices(), projectId, appKey, serviceMethodIndex, repositoryMethodIndex);
+        Map<String, String> interfaceToImplMapping = new HashMap<>();
+        Set<ServiceNode> serviceNodes = buildServiceNodes(analysis.getServices(), projectId, appKey, serviceMethodIndex, repositoryMethodIndex, interfaceToImplMapping);
         applicationNode.getServices().addAll(serviceNodes);
 
-        Set<ControllerNode> controllerNodes = buildControllerNodes(analysis.getControllers(), projectId, appKey, serviceMethodIndex);
+        Set<ControllerNode> controllerNodes = buildControllerNodes(analysis.getControllers(), projectId, appKey, serviceMethodIndex, interfaceToImplMapping);
         applicationNode.getControllers().addAll(controllerNodes);
 
         // Build and add Kafka listeners
@@ -116,7 +117,8 @@ public class GraphPersistenceService {
 
     // ========================= Controller Building =========================
 
-    private Set<ControllerNode> buildControllerNodes(List<ControllerInfo> controllers, String projectId, String appKey, Map<String, MethodNode> serviceMethodIndex) {
+    private Set<ControllerNode> buildControllerNodes(List<ControllerInfo> controllers, String projectId, String appKey,
+                                                       Map<String, MethodNode> serviceMethodIndex, Map<String, String> interfaceToImplMapping) {
         Set<ControllerNode> nodes = new HashSet<>();
         if (controllers == null) return nodes;
 
@@ -136,7 +138,7 @@ public class GraphPersistenceService {
 
             // Build endpoints
             Set<EndpointNode> endpointNodes = buildEndpointNodes(
-                    controller.getEndpoints(), projectId, appKey, controller.getClassName(), serviceMethodIndex);
+                    controller.getEndpoints(), projectId, appKey, controller.getClassName(), serviceMethodIndex, interfaceToImplMapping);
             controllerNode.getEndpoints().addAll(endpointNodes);
 
             // Extract base URL from first endpoint if available
@@ -154,7 +156,8 @@ public class GraphPersistenceService {
     }
 
     private Set<EndpointNode> buildEndpointNodes(List<EndpointInfo> endpoints, String projectId,
-                                                   String appKey, String controllerClass, Map<String, MethodNode> serviceMethodIndex) {
+                                                   String appKey, String controllerClass,
+                                                   Map<String, MethodNode> serviceMethodIndex, Map<String, String> interfaceToImplMapping) {
         Set<EndpointNode> nodes = new HashSet<>();
         if (endpoints == null) return nodes;
 
@@ -189,7 +192,7 @@ public class GraphPersistenceService {
             // Link endpoint directly to resolved service methods; ignore other call targets for this iteration
             if (endpoint.getCalls() != null) {
                 for (MethodCall call : endpoint.getCalls()) {
-                    MethodNode target = resolveServiceMethod(call, serviceMethodIndex);
+                    MethodNode target = resolveServiceMethod(call, serviceMethodIndex, interfaceToImplMapping);
                     if (target != null) {
                         endpointNode.getCalls().add(target);
                     } else {
@@ -205,7 +208,10 @@ public class GraphPersistenceService {
 
     // ========================= Service Building =========================
 
-    private Set<ServiceNode> buildServiceNodes(List<ServiceInfo> services, String projectId, String appKey, Map<String, MethodNode> serviceMethodIndex, Map<String, MethodNode> repositoryMethodIndex) {
+    private Set<ServiceNode> buildServiceNodes(List<ServiceInfo> services, String projectId, String appKey,
+                                                 Map<String, MethodNode> serviceMethodIndex,
+                                                 Map<String, MethodNode> repositoryMethodIndex,
+                                                 Map<String, String> interfaceToImplMapping) {
         Set<ServiceNode> nodes = new HashSet<>();
         if (services == null) return nodes;
         log.info("++++++++++++++++++++++++++++++++++++");
@@ -231,6 +237,25 @@ public class GraphPersistenceService {
             String fullClassName = service.getPackageName() != null
                     ? service.getPackageName() + "." + service.getClassName()
                     : service.getClassName();
+
+            // Build interface-to-implementation mapping
+            // This allows resolving method calls through interfaces to their implementation classes
+            if (service.getImplementedInterfaces() != null) {
+                for (String interfaceName : service.getImplementedInterfaces()) {
+                    // Map interface name (both simple and qualified) to implementation class
+                    interfaceToImplMapping.put(interfaceName, service.getClassName());
+                    interfaceToImplMapping.put(interfaceName, fullClassName);
+                    // Also index with #method for more specific lookups
+                    for (MethodNode methodNode : methodNodes) {
+                        String ifaceMethodKey = buildMethodKey(interfaceName, methodNode.getMethodName());
+                        if (ifaceMethodKey != null) {
+                            serviceMethodIndex.put(ifaceMethodKey, methodNode);
+                        }
+                    }
+                }
+                log.debug("Mapped interfaces {} to implementation {}", service.getImplementedInterfaces(), service.getClassName());
+            }
+
             // Index service methods by signature and class#method (simple + FQCN)
             for (MethodNode methodNode : methodNodes) {
                 if (methodNode.getSignature() != null) {
@@ -266,7 +291,7 @@ public class GraphPersistenceService {
                             methodNode.getCalls().add(repoTarget);
                             continue;
                         }
-                        MethodNode serviceTarget = resolveServiceMethod(call, serviceMethodIndex);
+                        MethodNode serviceTarget = resolveServiceMethod(call, serviceMethodIndex, interfaceToImplMapping);
                         if (serviceTarget != null) {
                             methodNode.getCalls().add(serviceTarget);
                         }
@@ -709,7 +734,8 @@ public class GraphPersistenceService {
         return "/" + cleanPath;
     }
 
-    private MethodNode resolveServiceMethod(MethodCall call, Map<String, MethodNode> serviceMethodIndex) {
+    private MethodNode resolveServiceMethod(MethodCall call, Map<String, MethodNode> serviceMethodIndex,
+                                             Map<String, String> interfaceToImplMapping) {
         if (call == null || serviceMethodIndex == null) {
             return null;
         }
@@ -729,6 +755,42 @@ public class GraphPersistenceService {
             }
         }
 
+        // Try interface-to-implementation resolution:
+        // If the className is an interface, look up the implementation class and try again
+        if (call.getClassName() != null && interfaceToImplMapping != null) {
+            String implClassName = interfaceToImplMapping.get(call.getClassName());
+            if (implClassName != null) {
+                String implKey = buildMethodKey(implClassName, call.getHandlerMethod());
+                if (implKey != null) {
+                    MethodNode byImplKey = serviceMethodIndex.get(implKey);
+                    if (byImplKey != null) {
+                        log.debug("Resolved interface method call: {}.{} -> {}.{}",
+                                call.getClassName(), call.getHandlerMethod(),
+                                implClassName, call.getHandlerMethod());
+                        return byImplKey;
+                    }
+                }
+            }
+
+            // Also try with simple class name extraction (e.g., "com.example.WorkflowService" -> "WorkflowService")
+            String simpleClassName = extractSimpleClassName(call.getClassName());
+            if (simpleClassName != null && !simpleClassName.equals(call.getClassName())) {
+                String simpleImplClassName = interfaceToImplMapping.get(simpleClassName);
+                if (simpleImplClassName != null) {
+                    String simpleImplKey = buildMethodKey(simpleImplClassName, call.getHandlerMethod());
+                    if (simpleImplKey != null) {
+                        MethodNode bySimpleImplKey = serviceMethodIndex.get(simpleImplKey);
+                        if (bySimpleImplKey != null) {
+                            log.debug("Resolved interface method call (simple name): {}.{} -> {}.{}",
+                                    simpleClassName, call.getHandlerMethod(),
+                                    simpleImplClassName, call.getHandlerMethod());
+                            return bySimpleImplKey;
+                        }
+                    }
+                }
+            }
+        }
+
         // Fallback: if className is absent but method name is unique across services, use that
         if (call.getHandlerMethod() != null) {
             List<MethodNode> byName = serviceMethodIndex.values().stream()
@@ -745,6 +807,21 @@ public class GraphPersistenceService {
                         && Objects.equals(node.getMethodName(), call.getHandlerMethod()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    /**
+     * Extract simple class name from fully qualified class name.
+     * e.g., "com.example.WorkflowService" -> "WorkflowService"
+     */
+    private String extractSimpleClassName(String className) {
+        if (className == null || className.isEmpty()) {
+            return null;
+        }
+        int lastDot = className.lastIndexOf('.');
+        if (lastDot >= 0 && lastDot < className.length() - 1) {
+            return className.substring(lastDot + 1);
+        }
+        return className;
     }
 
     private MethodNode resolveServiceMethodFromInfo(MethodInfo methodInfo, Map<String, MethodNode> serviceMethodIndex, String primaryClassName, String secondaryClassName) {

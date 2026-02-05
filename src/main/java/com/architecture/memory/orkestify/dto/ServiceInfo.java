@@ -16,4 +16,9 @@ public class ServiceInfo {
     private String packageName;
     private LineRange line;
     private List<MethodInfo> methods;
+    /**
+     * List of interface names that this service class implements.
+     * Used to resolve method calls through interfaces to their implementations.
+     */
+    private List<String> implementedInterfaces;
 }

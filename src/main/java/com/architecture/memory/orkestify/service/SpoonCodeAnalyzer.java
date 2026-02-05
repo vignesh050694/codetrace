@@ -262,8 +262,37 @@ public class SpoonCodeAnalyzer {
                         .packageName(ctClass.getPackage().getQualifiedName())
                         .line(createLineRange(ctClass))
                         .methods(extractMethods(ctClass, properties, valueFieldMapping, true))
+                        .implementedInterfaces(extractImplementedInterfaces(ctClass))
                         .build())
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Extract the list of interfaces implemented by a class.
+     * This is used to resolve method calls through interfaces to their implementations.
+     */
+    private List<String> extractImplementedInterfaces(CtType<?> ctClass) {
+        List<String> interfaces = new ArrayList<>();
+        try {
+            Set<CtTypeReference<?>> superInterfaces = ctClass.getSuperInterfaces();
+            if (superInterfaces != null) {
+                for (CtTypeReference<?> iface : superInterfaces) {
+                    // Add both simple name and qualified name for flexible resolution
+                    String simpleName = iface.getSimpleName();
+                    String qualifiedName = iface.getQualifiedName();
+
+                    if (simpleName != null && !simpleName.isEmpty()) {
+                        interfaces.add(simpleName);
+                    }
+                    if (qualifiedName != null && !qualifiedName.isEmpty() && !qualifiedName.equals(simpleName)) {
+                        interfaces.add(qualifiedName);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Could not extract interfaces for class: {}", ctClass.getSimpleName());
+        }
+        return interfaces;
     }
 
     private List<MethodInfo> extractMethods(CtType<?> clazz,
