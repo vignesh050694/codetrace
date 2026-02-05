@@ -28,6 +28,7 @@ public class GraphResolutionService {
     private final KafkaTopicNodeRepository kafkaTopicNodeRepository;
     private final KafkaListenerNodeRepository kafkaListenerNodeRepository;
     private final ApplicationNodeRepository applicationNodeRepository;
+    private final ExternalCallNodeRepository externalCallNodeRepository;
 
     private static final Pattern HOST_PATTERN = Pattern.compile("https?://([^:/]+)");
 
@@ -37,68 +38,75 @@ public class GraphResolutionService {
      */
     @Transactional
     public void resolveExternalCalls(String projectId) {
-        log.info("Resolving external API calls for project: {}", projectId);
+        log.info("[external-resolution] start projectId={} ", projectId);
 
-        // Get all endpoints in the project for matching
+        // Gather endpoints and build map of id -> normalized path
         List<EndpointNode> allEndpoints = endpointNodeRepository.findByProjectId(projectId);
-        log.info("Found {} endpoints in project for resolution", allEndpoints.size());
+        log.info("[external-resolution] endpoints={} ", allEndpoints.size());
+        Map<String, String> endpointPathById = new HashMap<>();
+        for (EndpointNode endpoint : allEndpoints) {
+            if (endpoint.getId() != null && endpoint.getFullPath() != null) {
+                endpointPathById.put(endpoint.getId(), normalizeUrl(endpoint.getFullPath()));
+            }
+        }
 
+        // Gather all external calls directly from the graph
+        List<ExternalCallNode> externalCalls = externalCallNodeRepository.findByProjectId(projectId);
+        log.info("[external-resolution] externalCalls={} ", externalCalls.size());
         int resolvedCount = 0;
+        int skippedDynamic = 0;
 
-        // Resolve from methods with external calls
-        List<MethodNode> methodsWithExternalCalls = methodNodeRepository.findMethodsWithExternalCalls(projectId);
-        for (MethodNode method : methodsWithExternalCalls) {
-            if (method.getExternalCalls() != null) {
-                for (ExternalCallNode externalCall : method.getExternalCalls()) {
-                    if (resolveExternalCall(externalCall, allEndpoints)) {
-                        resolvedCount++;
-                    }
+        for (ExternalCallNode externalCall : externalCalls) {
+            if (externalCall.isResolved()) continue;
+            String url = externalCall.getUrl();
+            if (url == null || url.isBlank() || "<dynamic>".equals(url)) {
+                skippedDynamic++;
+                continue;
+            }
+
+            String normalizedUrl = normalizeUrl(url);
+            if (normalizedUrl.isEmpty()) {
+                skippedDynamic++;
+                continue;
+            }
+
+            List<String> urlCandidates = buildUrlCandidates(normalizedUrl);
+            EndpointNode bestEndpoint = null;
+            int bestScore = 0;
+
+            for (Map.Entry<String, String> entry : endpointPathById.entrySet()) {
+                String endpointId = entry.getKey();
+                String endpointPath = entry.getValue();
+                int score = 0;
+                for (String candidate : urlCandidates) {
+                    score = Math.max(score, calculateMatchScore(candidate, endpointPath));
                 }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestEndpoint = allEndpoints.stream()
+                            .filter(e -> endpointId.equals(e.getId()))
+                            .findFirst()
+                            .orElse(null);
+                }
+            }
+
+            if (bestEndpoint != null && bestScore >= 3) {
+                externalCall.setResolved(true);
+                externalCall.setTargetEndpointNode(bestEndpoint);
+                externalCall.setTargetControllerClass(bestEndpoint.getControllerClass());
+                externalCall.setTargetHandlerMethod(bestEndpoint.getHandlerMethod());
+                externalCall.setTargetEndpoint(bestEndpoint.getFullPath());
+                externalCall.setResolutionReason("Matched endpoint via scoring");
+                resolvedCount++;
             }
         }
 
-        // Resolve from endpoints with external calls
-        List<EndpointNode> endpointsWithExternalCalls = endpointNodeRepository.findByProjectIdWithExternalCalls(projectId);
-        for (EndpointNode endpoint : endpointsWithExternalCalls) {
-            if (endpoint.getExternalCalls() != null) {
-                for (ExternalCallNode externalCall : endpoint.getExternalCalls()) {
-                    if (resolveExternalCall(externalCall, allEndpoints)) {
-                        resolvedCount++;
-                    }
-                }
-            }
-        }
-
-        // Resolve from Kafka listener methods with external calls
-        List<KafkaListenerNode> listenersWithExternalCalls = kafkaListenerNodeRepository.findByProjectIdWithExternalCalls(projectId);
-        for (KafkaListenerNode listener : listenersWithExternalCalls) {
-            if (listener.getListenerMethods() != null) {
-                for (KafkaListenerMethodNode listenerMethod : listener.getListenerMethods()) {
-                    if (listenerMethod.getExternalCalls() != null) {
-                        for (ExternalCallNode externalCall : listenerMethod.getExternalCalls()) {
-                            if (resolveExternalCall(externalCall, allEndpoints)) {
-                                resolvedCount++;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Save resolved nodes
         if (resolvedCount > 0) {
-            for (MethodNode method : methodsWithExternalCalls) {
-                methodNodeRepository.save(method);
-            }
-            for (EndpointNode endpoint : endpointsWithExternalCalls) {
-                endpointNodeRepository.save(endpoint);
-            }
-            for (KafkaListenerNode listener : listenersWithExternalCalls) {
-                kafkaListenerNodeRepository.save(listener);
-            }
+            externalCallNodeRepository.saveAll(externalCalls);
         }
 
-        log.info("Resolved {} external API calls for project: {}", resolvedCount, projectId);
+        log.info("[external-resolution] end projectId={} resolved={} skippedDynamic={} endpoints={} externalCalls={} ",
+                projectId, resolvedCount, skippedDynamic, allEndpoints.size(), externalCalls.size());
     }
 
     /**
@@ -149,6 +157,8 @@ public class GraphResolutionService {
             return Optional.empty();
         }
 
+        List<String> urlCandidates = buildUrlCandidates(normalizedUrl);
+
         EndpointNode bestMatch = null;
         int bestScore = 0;
 
@@ -163,7 +173,10 @@ public class GraphResolutionService {
             }
 
             String endpointPath = normalizeUrl(endpoint.getFullPath());
-            int score = calculateMatchScore(normalizedUrl, endpointPath);
+            int score = 0;
+            for (String candidate : urlCandidates) {
+                score = Math.max(score, calculateMatchScore(candidate, endpointPath));
+            }
 
             if (score > bestScore) {
                 bestScore = score;
@@ -177,6 +190,34 @@ public class GraphResolutionService {
         }
 
         return Optional.empty();
+    }
+
+    private List<String> buildUrlCandidates(String normalizedUrl) {
+        List<String> candidates = new ArrayList<>();
+        if (normalizedUrl == null || normalizedUrl.isEmpty()) return candidates;
+
+        String cleaned = normalizedUrl;
+        if (!cleaned.startsWith("/")) {
+            cleaned = "/" + cleaned;
+        }
+        candidates.add(cleaned);
+
+        // Remove gateway/base path segments (e.g., /user-service//student/{id} -> /student/{id})
+        String[] parts = cleaned.split("/");
+        List<String> segments = new ArrayList<>();
+        for (String part : parts) {
+            if (part == null || part.isBlank()) continue;
+            segments.add(part);
+        }
+
+        if (segments.size() >= 2) {
+            candidates.add("/" + String.join("/", segments.subList(1, segments.size())));
+        }
+        if (segments.size() >= 3) {
+            candidates.add("/" + String.join("/", segments.subList(2, segments.size())));
+        }
+
+        return candidates;
     }
 
     /**
@@ -239,7 +280,7 @@ public class GraphResolutionService {
     private String normalizeUrl(String url) {
         if (url == null) return "";
 
-        String normalized = url;
+        String normalized = url.trim();
 
         // Remove protocol and host if present
         if (normalized.contains("://")) {
@@ -263,14 +304,20 @@ public class GraphResolutionService {
             normalized = normalized.substring(0, fragmentStart);
         }
 
+        // Remove <dynamic> tokens anywhere in path
+        normalized = normalized.replace("<dynamic>", "");
+
+        // Collapse multiple slashes
+        normalized = normalized.replaceAll("/{2,}", "/");
+
         // Remove trailing slash
         if (normalized.endsWith("/") && normalized.length() > 1) {
             normalized = normalized.substring(0, normalized.length() - 1);
         }
 
-        // Remove <dynamic> prefix if present (e.g., <dynamic>/api/users)
-        if (normalized.startsWith("<dynamic>")) {
-            normalized = normalized.substring("<dynamic>".length());
+        // Ensure leading slash for path-only comparison
+        if (!normalized.isEmpty() && !normalized.startsWith("/")) {
+            normalized = "/" + normalized;
         }
 
         return normalized;
@@ -350,9 +397,12 @@ public class GraphResolutionService {
         Map<String, Set<String>> producerServicesByTopic = new HashMap<>();
 
         for (Map<String, Object> row : producerRows) {
-            String topicName = (String) row.get("topicName");
-            String className = (String) row.get("className");
-            String methodName = (String) row.get("methodName");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = row.containsKey("result") ? (Map<String, Object>) row.get("result") : row;
+
+            String topicName = (String) result.get("topicName");
+            String className = (String) result.get("className");
+            String methodName = (String) result.get("methodName");
 
             if (topicName != null && className != null) {
                 String detail = methodName != null ? className + "." + methodName + "()" : className;
@@ -367,10 +417,13 @@ public class GraphResolutionService {
         Map<String, Set<String>> consumerServicesByTopic = new HashMap<>();
 
         for (Map<String, Object> row : consumerRows) {
-            String topicName = (String) row.get("topicName");
-            String className = (String) row.get("className");
-            String methodName = (String) row.get("methodName");
-            String groupId = (String) row.get("groupId");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = row.containsKey("result") ? (Map<String, Object>) row.get("result") : row;
+
+            String topicName = (String) result.get("topicName");
+            String className = (String) result.get("className");
+            String methodName = (String) result.get("methodName");
+            String groupId = (String) result.get("groupId");
 
             if (topicName != null && className != null) {
                 String detail = methodName != null ? className + "." + methodName + "()" : className;

@@ -3,6 +3,7 @@ package com.architecture.memory.orkestify.model.graph.nodes;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 import org.springframework.data.neo4j.core.schema.GeneratedValue;
 import org.springframework.data.neo4j.core.schema.Id;
@@ -19,6 +20,7 @@ import java.util.Set;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@EqualsAndHashCode(exclude = {"methods", "accessesTables"})
 public class RepositoryClassNode {
 
     @Id
@@ -54,5 +56,6 @@ public class RepositoryClassNode {
     private Set<MethodNode> methods = new HashSet<>();
 
     @Relationship(type = "ACCESSES", direction = Relationship.Direction.OUTGOING)
-    private DatabaseTableNode accessesTable;
+    @Builder.Default
+    private Set<DatabaseTableNode> accessesTables = new HashSet<>();
 }

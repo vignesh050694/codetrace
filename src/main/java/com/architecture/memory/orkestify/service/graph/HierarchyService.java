@@ -5,6 +5,10 @@ import com.architecture.memory.orkestify.model.graph.nodes.*;
 import com.architecture.memory.orkestify.repository.graph.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.neo4j.driver.Driver;
+import org.neo4j.driver.Record;
+import org.neo4j.driver.Session;
+import org.neo4j.driver.Result;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 
@@ -27,6 +31,8 @@ public class HierarchyService {
     private final RepositoryClassNodeRepository repositoryClassNodeRepository;
     private final KafkaTopicNodeRepository kafkaTopicNodeRepository;
     private final KafkaListenerNodeRepository kafkaListenerNodeRepository;
+    private final MethodNodeRepository methodNodeRepository;
+    private final Driver neo4jDriver;
 
     /**
      * Level 1: Get list of all applications with summary counts.
@@ -38,7 +44,7 @@ public class HierarchyService {
             List<ControllerNode> allControllers = controllerNodeRepository.findByProjectId(projectId);
             List<EndpointNode> allEndpoints = endpointNodeRepository.findByProjectId(projectId);
             List<ServiceNode> allServices = serviceNodeRepository.findByProjectId(projectId);
-            List<RepositoryClassNode> allRepositories = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
+            List<RepositoryClassNode> allRepositories = repositoryClassNodeRepository.findByProjectId(projectId);
             List<KafkaListenerNode> allListeners = kafkaListenerNodeRepository.findByProjectIdWithListenerMethods(projectId);
 
             List<ApplicationListResponse.ApplicationItem> applicationItems = apps.stream()
@@ -66,11 +72,28 @@ public class HierarchyService {
                                 .mapToLong(l -> l.getListenerMethods() != null ? l.getListenerMethods().size() : 0)
                                 .sum();
 
-                        // Count database tables
-                        int databaseTablesCount = (int) allRepositories.stream()
-                                .filter(r -> appKey.equals(r.getAppKey()))
-                                .filter(r -> r.getAccessesTable() != null)
-                                .count();
+                        // Count database tables using Neo4j Driver directly
+                        int databaseTablesCount = 0;
+                        try (Session session = neo4jDriver.session()) {
+                            Set<String> appRepoNames = allRepositories.stream()
+                                    .filter(r -> appKey.equals(r.getAppKey()))
+                                    .map(RepositoryClassNode::getClassName)
+                                    .collect(Collectors.toSet());
+
+                            String query = "MATCH (r:RepositoryClass {projectId: $projectId})-[:ACCESSES]->(t:DatabaseTable) " +
+                                           "RETURN r.className as repoClass";
+                            Result result = session.run(query, Map.of("projectId", projectId));
+
+                            while (result.hasNext()) {
+                                Record record = result.next();
+                                String repoClass = record.get("repoClass").isNull() ? null : record.get("repoClass").asString();
+                                if (repoClass != null && appRepoNames.contains(repoClass)) {
+                                    databaseTablesCount++;
+                                }
+                            }
+                        } catch (Exception e) {
+                            log.warn("Failed to count database tables for app {}: {}", appKey, e.getMessage());
+                        }
 
                         return ApplicationListResponse.ApplicationItem.builder()
                                 .id(app.getId())
@@ -115,9 +138,30 @@ public class HierarchyService {
 
             String appKey = app.getAppKey();
 
+            // Fallback caches
+            List<EndpointNode> allEndpoints = endpointNodeRepository.findByProjectId(projectId).stream()
+                    .filter(e -> appKey.equals(e.getAppKey()))
+                    .toList();
+            Map<String, List<EndpointNode>> endpointsByController = allEndpoints.stream()
+                    .filter(e -> e.getControllerClass() != null)
+                    .collect(Collectors.groupingBy(EndpointNode::getControllerClass));
+
+            List<MethodNode> allMethods = methodNodeRepository.findByProjectId(projectId).stream()
+                    .filter(m -> appKey.equals(m.getAppKey()))
+                    .toList();
+            Map<String, List<MethodNode>> methodsByService = allMethods.stream()
+                    .filter(m -> m.getClassName() != null)
+                    .collect(Collectors.groupingBy(MethodNode::getClassName));
+
             // Get controllers with endpoints
             List<ControllerNode> controllers = controllerNodeRepository.findByProjectIdWithEndpoints(projectId).stream()
                     .filter(c -> appKey.equals(c.getAppKey()))
+                    .peek(c -> {
+                        if (c.getEndpoints() == null || c.getEndpoints().isEmpty()) {
+                            List<EndpointNode> fallback = endpointsByController.getOrDefault(c.getClassName(), List.of());
+                            c.setEndpoints(new HashSet<>(fallback));
+                        }
+                    })
                     .collect(Collectors.toList());
 
             List<ApplicationDetailResponse.ControllerItem> controllerItems = controllers.stream()
@@ -148,6 +192,12 @@ public class HierarchyService {
             // Get services
             List<ServiceNode> services = serviceNodeRepository.findByProjectIdWithMethods(projectId).stream()
                     .filter(s -> appKey.equals(s.getAppKey()))
+                    .peek(s -> {
+                        if (s.getMethods() == null || s.getMethods().isEmpty()) {
+                            List<MethodNode> fallback = methodsByService.getOrDefault(s.getClassName(), List.of());
+                            s.setMethods(new HashSet<>(fallback));
+                        }
+                    })
                     .collect(Collectors.toList());
 
             List<ApplicationDetailResponse.ServiceItem> serviceItems = services.stream()
@@ -156,6 +206,15 @@ public class HierarchyService {
                             .className(service.getClassName())
                             .packageName(service.getPackageName())
                             .methodsCount(service.getMethods() != null ? service.getMethods().size() : 0)
+                            .methods(service.getMethods() != null ? service.getMethods().stream()
+                                    .map(m -> ApplicationDetailResponse.MethodSummary.builder()
+                                            .id(m.getId())
+                                            .methodName(m.getMethodName())
+                                            .signature(m.getSignature())
+                                            .lineStart(m.getLineStart())
+                                            .lineEnd(m.getLineEnd())
+                                            .build())
+                                    .collect(Collectors.toList()) : Collections.emptyList())
                             .build())
                     .collect(Collectors.toList());
 
@@ -198,22 +257,49 @@ public class HierarchyService {
                 }
             }
 
-            // Get database access
-            List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId).stream()
-                    .filter(r -> appKey.equals(r.getAppKey()))
-                    .collect(Collectors.toList());
+            // Get database access using Neo4j Driver directly (avoids SDN mapping issues)
+            List<ApplicationDetailResponse.DatabaseItem> databaseItems = new ArrayList<>();
 
-            List<ApplicationDetailResponse.DatabaseItem> databaseItems = repositories.stream()
-                    .filter(r -> r.getAccessesTable() != null)
-                    .map(repo -> ApplicationDetailResponse.DatabaseItem.builder()
-                            .id(repo.getAccessesTable().getId())
-                            .tableName(repo.getAccessesTable().getTableName())
-                            .repositoryClass(repo.getClassName())
-                            .databaseType(repo.getRepositoryType())
-                            .operations(repo.getAccessesTable().getOperations() != null ?
-                                    new ArrayList<>(repo.getAccessesTable().getOperations()) : Collections.emptyList())
-                            .build())
-                    .collect(Collectors.toList());
+            try (Session session = neo4jDriver.session()) {
+                // Get repositories for appKey filtering
+                List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectId(projectId).stream()
+                        .filter(r -> appKey.equals(r.getAppKey()))
+                        .collect(Collectors.toList());
+                Set<String> appRepoNames = repositories.stream()
+                        .map(RepositoryClassNode::getClassName)
+                        .collect(Collectors.toSet());
+
+                // Query database tables directly using Neo4j Driver
+                String query = "MATCH (r:RepositoryClass {projectId: $projectId})-[:ACCESSES]->(t:DatabaseTable) " +
+                               "RETURN r.className as repoClass, t.id as tableId, t.tableName as tableName, " +
+                               "t.databaseType as databaseType, t.operations as operations";
+
+                Result result = session.run(query, Map.of("projectId", projectId));
+
+                while (result.hasNext()) {
+                    Record record = result.next();
+                    String repoClass = record.get("repoClass").isNull() ? null : record.get("repoClass").asString();
+                    String tableName = record.get("tableName").isNull() ? null : record.get("tableName").asString();
+
+                    if (repoClass == null || tableName == null || !appRepoNames.contains(repoClass)) {
+                        continue;
+                    }
+
+                    String tableId = record.get("tableId").isNull() ? null : record.get("tableId").asString();
+                    String databaseType = record.get("databaseType").isNull() ? null : record.get("databaseType").asString();
+                    List<String> operations = record.get("operations").isNull() ? Collections.emptyList() : record.get("operations").asList(v -> v.asString());
+
+                    databaseItems.add(ApplicationDetailResponse.DatabaseItem.builder()
+                            .id(tableId)
+                            .tableName(tableName)
+                            .repositoryClass(repoClass)
+                            .databaseType(databaseType)
+                            .operations(operations)
+                            .build());
+                }
+            } catch (Exception e) {
+                log.warn("Failed to fetch database tables: {}", e.getMessage());
+            }
 
             return ApplicationDetailResponse.builder()
                     .application(ApplicationDetailResponse.ApplicationInfo.builder()
@@ -416,7 +502,7 @@ public class HierarchyService {
             }
 
             // Get repositories used
-            List<RepositoryClassNode> allRepos = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(service.getProjectId());
+            List<RepositoryClassNode> allRepos = repositoryClassNodeRepository.findByProjectId(service.getProjectId());
             List<ServiceDetailResponse.RepositoryUsage> repositoriesUsed = new ArrayList<>();
 
             // Find repositories that this service uses by checking method calls
@@ -424,22 +510,35 @@ public class HierarchyService {
                     .map(RepositoryClassNode::getClassName)
                     .collect(Collectors.toSet());
 
+            // Get table names using Neo4j Driver directly
+            Map<String, String> repoToTable = new HashMap<>();
+            try (Session session = neo4jDriver.session()) {
+                String query = "MATCH (r:RepositoryClass {projectId: $projectId})-[:ACCESSES]->(t:DatabaseTable) " +
+                               "RETURN r.className as repoClass, t.tableName as tableName";
+                Result result = session.run(query, Map.of("projectId", service.getProjectId()));
+
+                while (result.hasNext()) {
+                    Record record = result.next();
+                    String repoClass = record.get("repoClass").isNull() ? null : record.get("repoClass").asString();
+                    String tableName = record.get("tableName").isNull() ? null : record.get("tableName").asString();
+                    if (repoClass != null && tableName != null) {
+                        repoToTable.put(repoClass, tableName);
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to get repo-table mappings: {}", e.getMessage());
+            }
+
             if (service.getMethods() != null) {
                 for (MethodNode method : service.getMethods()) {
                     if (method.getCalls() != null) {
                         for (MethodNode calledMethod : method.getCalls()) {
                             if (repoClassNames.contains(calledMethod.getClassName())) {
-                                RepositoryClassNode repo = allRepos.stream()
-                                        .filter(r -> calledMethod.getClassName().equals(r.getClassName()))
-                                        .findFirst()
-                                        .orElse(null);
-                                if (repo != null) {
-                                    repositoriesUsed.add(ServiceDetailResponse.RepositoryUsage.builder()
-                                            .className(repo.getClassName())
-                                            .tableName(repo.getAccessesTable() != null ?
-                                                    repo.getAccessesTable().getTableName() : null)
-                                            .build());
-                                }
+                                String tableName = repoToTable.get(calledMethod.getClassName());
+                                repositoriesUsed.add(ServiceDetailResponse.RepositoryUsage.builder()
+                                        .className(calledMethod.getClassName())
+                                        .tableName(tableName)
+                                        .build());
                             }
                         }
                     }
@@ -610,19 +709,28 @@ public class HierarchyService {
             return;
         }
 
-        List<RepositoryClassNode> repos = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
-        Map<String, RepositoryClassNode> repoByClassName = repos.stream()
-                .collect(Collectors.toMap(RepositoryClassNode::getClassName, r -> r, (a, b) -> a));
+        // Use safer approach to get table mappings
+        Map<String, String> repoToTable = new HashMap<>();
+        try {
+            repoToTable = repositoryClassNodeRepository.findRepoTableMappings(projectId).stream()
+                    .filter(row -> row.get("repoClass") != null && row.get("tableName") != null)
+                    .collect(Collectors.toMap(
+                            row -> (String) row.get("repoClass"),
+                            row -> (String) row.get("tableName"),
+                            (a, b) -> a));
+        } catch (Exception e) {
+            log.warn("Failed to get repo-table mappings for endpoint flow: {}", e.getMessage());
+        }
 
         for (MethodNode method : methods) {
             if ("REPOSITORY_METHOD".equals(method.getMethodType())) {
-                RepositoryClassNode repo = repoByClassName.get(method.getClassName());
-                if (repo != null && repo.getAccessesTable() != null) {
+                String tableName = repoToTable.get(method.getClassName());
+                if (tableName != null) {
                     String operation = inferOperation(method.getMethodName());
                     EndpointFlowResponse.DatabaseAccess access = EndpointFlowResponse.DatabaseAccess.builder()
-                            .table(repo.getAccessesTable().getTableName())
+                            .table(tableName)
                             .operation(operation)
-                            .repository(repo.getClassName())
+                            .repository(method.getClassName())
                             .build();
                     if (!accesses.contains(access)) {
                         accesses.add(access);

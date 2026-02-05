@@ -14,10 +14,11 @@ public interface KafkaTopicNodeRepository extends Neo4jRepository<KafkaTopicNode
 
     Optional<KafkaTopicNode> findByName(String name);
 
+    Optional<KafkaTopicNode> findByProjectIdAndName(String projectId, String name);
+
     List<KafkaTopicNode> findByProjectId(String projectId);
 
-    @Query("MERGE (t:KafkaTopic {name: $name, projectId: $projectId}) " +
-           "RETURN t")
+    @Query("MERGE (t:KafkaTopic {name: $name, projectId: $projectId}) RETURN t")
     KafkaTopicNode findOrCreate(String name, String projectId);
 
     @Query("MATCH (producer)-[:PRODUCES_TO]->(t:KafkaTopic {name: $topicName})<-[:CONSUMES_FROM]-(consumer) " +
@@ -45,15 +46,21 @@ public interface KafkaTopicNodeRepository extends Neo4jRepository<KafkaTopicNode
     // Producer details: which service.method produces to each topic
     @Query("MATCH (m)-[:PRODUCES_TO]->(t:KafkaTopic {projectId: $projectId}) " +
            "WHERE m:Method OR m:KafkaListenerMethod OR m:Endpoint " +
-           "RETURN t.name AS topicName, " +
-           "COALESCE(m.className, m.listenerClass, m.controllerClass) AS className, " +
-           "COALESCE(m.methodName, m.handlerMethod) AS methodName, " +
-           "labels(m)[0] AS nodeType")
+           "RETURN {" +
+           "  topicName: t.name, " +
+           "  className: COALESCE(m.className, m.listenerClass, m.controllerClass), " +
+           "  methodName: COALESCE(m.methodName, m.handlerMethod), " +
+           "  nodeType: labels(m)[0]" +
+           "} AS result")
     List<Map<String, Object>> findProducerDetailsForProject(String projectId);
 
     // Consumer details: which listener.method consumes from each topic
     @Query("MATCH (m:KafkaListenerMethod)-[:CONSUMES_FROM]->(t:KafkaTopic {projectId: $projectId}) " +
-           "RETURN t.name AS topicName, m.listenerClass AS className, " +
-           "m.methodName AS methodName, m.groupId AS groupId")
+           "RETURN {" +
+           "  topicName: t.name, " +
+           "  className: m.listenerClass, " +
+           "  methodName: m.methodName, " +
+           "  groupId: m.groupId" +
+           "} AS result")
     List<Map<String, Object>> findConsumerDetailsForProject(String projectId);
 }

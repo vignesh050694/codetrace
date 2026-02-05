@@ -25,7 +25,12 @@ public class GraphPersistenceService {
      */
     @Transactional
     public void persistAnalysis(String projectId, String userId, String repoUrl, CodeAnalysisResponse analysis) {
-        log.info("Persisting analysis to Neo4j graph for project: {}, repo: {}", projectId, repoUrl);
+        log.info("[graph-persist] begin projectId={} repoUrl={} controllers={} services={} repos={} kafkaListeners={}",
+                projectId, repoUrl,
+                analysis.getControllers() != null ? analysis.getControllers().size() : 0,
+                analysis.getServices() != null ? analysis.getServices().size() : 0,
+                analysis.getRepositories() != null ? analysis.getRepositories().size() : 0,
+                analysis.getKafkaListeners() != null ? analysis.getKafkaListeners().size() : 0);
 
         String appKey = buildAppKey(repoUrl, analysis.getApplicationInfo());
 
@@ -71,28 +76,33 @@ public class GraphPersistenceService {
         applicationNode.setAnalyzedAt(analysis.getAnalyzedAt());
         applicationNode.setStatus(analysis.getStatus());
 
-        // Build and add all component nodes
-        Set<ControllerNode> controllerNodes = buildControllerNodes(analysis.getControllers(), projectId, appKey);
-        applicationNode.getControllers().addAll(controllerNodes);
-
-        Set<ServiceNode> serviceNodes = buildServiceNodes(analysis.getServices(), projectId, appKey);
-        applicationNode.getServices().addAll(serviceNodes);
-
-        Set<RepositoryClassNode> repositoryNodes = buildRepositoryNodes(analysis.getRepositories(), projectId, appKey);
+        // Build and add minimal component nodes: controllers -> endpoints -> service methods
+        Map<String, MethodNode> repositoryMethodIndex = new HashMap<>();
+        Set<RepositoryClassNode> repositoryNodes = buildRepositoryNodes(analysis.getRepositories(), projectId, appKey, repositoryMethodIndex);
         applicationNode.getRepositories().addAll(repositoryNodes);
 
+        Map<String, MethodNode> serviceMethodIndex = new HashMap<>();
+        Set<ServiceNode> serviceNodes = buildServiceNodes(analysis.getServices(), projectId, appKey, serviceMethodIndex, repositoryMethodIndex);
+        applicationNode.getServices().addAll(serviceNodes);
+
+        Set<ControllerNode> controllerNodes = buildControllerNodes(analysis.getControllers(), projectId, appKey, serviceMethodIndex);
+        applicationNode.getControllers().addAll(controllerNodes);
+
+        // Build and add Kafka listeners
         Set<KafkaListenerNode> kafkaListenerNodes = buildKafkaListenerNodes(analysis.getKafkaListeners(), projectId, appKey);
         applicationNode.getKafkaListeners().addAll(kafkaListenerNodes);
 
-        Set<ConfigurationNode> configurationNodes = buildConfigurationNodes(analysis.getConfigurations(), projectId, appKey);
-        applicationNode.getConfigurations().addAll(configurationNodes);
+        log.info("[graph-persist] saving application node {}", applicationNode.getAppKey());
+        applicationNodeRepository.save(applicationNode);
+        log.info("[graph-persist] saved application node {}", applicationNode.getAppKey());
+
+        log.info("[graph-persist] persisting controllers:{} services:{} repositories:{} kafkaListeners:{} configurations:{}",
+                controllerNodes.size(), serviceNodes.size(), repositoryNodes.size(), kafkaListenerNodes.size());
 
         // Save the entire graph (Neo4j will cascade save all related nodes)
         applicationNodeRepository.save(applicationNode);
 
-        log.info("Successfully persisted analysis to Neo4j graph. Controllers: {}, Services: {}, Repositories: {}, KafkaListeners: {}, Configurations: {}",
-                controllerNodes.size(), serviceNodes.size(), repositoryNodes.size(),
-                kafkaListenerNodes.size(), configurationNodes.size());
+        log.info("[graph-persist] end projectId={} appKey={}", projectId, applicationNode.getAppKey());
     }
 
     /**
@@ -106,7 +116,7 @@ public class GraphPersistenceService {
 
     // ========================= Controller Building =========================
 
-    private Set<ControllerNode> buildControllerNodes(List<ControllerInfo> controllers, String projectId, String appKey) {
+    private Set<ControllerNode> buildControllerNodes(List<ControllerInfo> controllers, String projectId, String appKey, Map<String, MethodNode> serviceMethodIndex) {
         Set<ControllerNode> nodes = new HashSet<>();
         if (controllers == null) return nodes;
 
@@ -126,7 +136,7 @@ public class GraphPersistenceService {
 
             // Build endpoints
             Set<EndpointNode> endpointNodes = buildEndpointNodes(
-                    controller.getEndpoints(), projectId, appKey, controller.getClassName());
+                    controller.getEndpoints(), projectId, appKey, controller.getClassName(), serviceMethodIndex);
             controllerNode.getEndpoints().addAll(endpointNodes);
 
             // Extract base URL from first endpoint if available
@@ -144,7 +154,7 @@ public class GraphPersistenceService {
     }
 
     private Set<EndpointNode> buildEndpointNodes(List<EndpointInfo> endpoints, String projectId,
-                                                   String appKey, String controllerClass) {
+                                                   String appKey, String controllerClass, Map<String, MethodNode> serviceMethodIndex) {
         Set<EndpointNode> nodes = new HashSet<>();
         if (endpoints == null) return nodes;
 
@@ -176,20 +186,17 @@ public class GraphPersistenceService {
                 endpointNode.setResponseType(endpoint.getResponse().getType());
             }
 
-            // Build method calls
-            Set<MethodNode> calledMethods = buildMethodNodesFromCalls(
-                    endpoint.getCalls(), projectId, appKey, "ENDPOINT_CALL");
-            endpointNode.getCalls().addAll(calledMethods);
-
-            // Build external calls
-            Set<ExternalCallNode> externalCallNodes = buildExternalCallNodes(
-                    endpoint.getExternalCalls(), projectId, appKey);
-            endpointNode.getExternalCalls().addAll(externalCallNodes);
-
-            // Build Kafka producer relationships
-            Set<KafkaTopicNode> producerTopics = buildKafkaTopicNodesFromCalls(
-                    endpoint.getKafkaCalls(), projectId, "PRODUCER");
-            endpointNode.getProducesToTopics().addAll(producerTopics);
+            // Link endpoint directly to resolved service methods; ignore other call targets for this iteration
+            if (endpoint.getCalls() != null) {
+                for (MethodCall call : endpoint.getCalls()) {
+                    MethodNode target = resolveServiceMethod(call, serviceMethodIndex);
+                    if (target != null) {
+                        endpointNode.getCalls().add(target);
+                    } else {
+                        log.debug("Skipped unresolved service call from endpoint {} {} to {}", endpoint.getMethod(), endpoint.getPath(), call.getSignature());
+                    }
+                }
+            }
 
             nodes.add(endpointNode);
         }
@@ -198,10 +205,10 @@ public class GraphPersistenceService {
 
     // ========================= Service Building =========================
 
-    private Set<ServiceNode> buildServiceNodes(List<ServiceInfo> services, String projectId, String appKey) {
+    private Set<ServiceNode> buildServiceNodes(List<ServiceInfo> services, String projectId, String appKey, Map<String, MethodNode> serviceMethodIndex, Map<String, MethodNode> repositoryMethodIndex) {
         Set<ServiceNode> nodes = new HashSet<>();
         if (services == null) return nodes;
-
+        log.info("++++++++++++++++++++++++++++++++++++");
         for (ServiceInfo service : services) {
             ServiceNode serviceNode = ServiceNode.builder()
                     .className(service.getClassName())
@@ -216,10 +223,57 @@ public class GraphPersistenceService {
                 serviceNode.setLineEnd(service.getLine().getEnd());
             }
 
-            // Build service methods
+            // Build service methods (initially without resolving calls to repositories)
             Set<MethodNode> methodNodes = buildMethodNodesFromMethodInfo(
                     service.getMethods(), projectId, appKey, service.getClassName(), "SERVICE_METHOD");
             serviceNode.getMethods().addAll(methodNodes);
+
+            String fullClassName = service.getPackageName() != null
+                    ? service.getPackageName() + "." + service.getClassName()
+                    : service.getClassName();
+            // Index service methods by signature and class#method (simple + FQCN)
+            for (MethodNode methodNode : methodNodes) {
+                if (methodNode.getSignature() != null) {
+                    serviceMethodIndex.put(methodNode.getSignature(), methodNode);
+                }
+                String key = buildMethodKey(methodNode.getClassName(), methodNode.getMethodName());
+                if (key != null) {
+                    serviceMethodIndex.put(key, methodNode);
+                }
+                String fqKey = buildMethodKey(fullClassName, methodNode.getMethodName());
+                if (fqKey != null) {
+                    serviceMethodIndex.put(fqKey, methodNode);
+                }
+                serviceMethodIndex.putIfAbsent(methodNode.getMethodName(), methodNode);
+            }
+
+            // Link service methods to repository or other service methods using captured MethodInfo calls
+            if (service.getMethods() != null) {
+                for (MethodInfo methodInfo : service.getMethods()) {
+                    if (methodInfo.getMethodName().equals("validateExceeding100")){
+                        System.out.println("In");
+                    }
+                    System.out.println("Started" +methodInfo.getMethodName());
+                    MethodNode methodNode = resolveServiceMethodFromInfo(methodInfo, serviceMethodIndex, fullClassName, service.getClassName());
+                    if (methodNode == null) continue;
+
+                    methodNode.getCalls().clear();
+                    if (methodInfo.getCalls() == null) continue;
+
+                    for (MethodCall call : methodInfo.getCalls()) {
+                        MethodNode repoTarget = resolveRepositoryMethod(call, repositoryMethodIndex);
+                        if (repoTarget != null) {
+                            methodNode.getCalls().add(repoTarget);
+                            continue;
+                        }
+                        MethodNode serviceTarget = resolveServiceMethod(call, serviceMethodIndex);
+                        if (serviceTarget != null) {
+                            methodNode.getCalls().add(serviceTarget);
+                        }
+                    }
+                    System.out.println("ended" +methodInfo.getMethodName());
+                }
+            }
 
             nodes.add(serviceNode);
         }
@@ -229,7 +283,7 @@ public class GraphPersistenceService {
     // ========================= Repository Building =========================
 
     private Set<RepositoryClassNode> buildRepositoryNodes(List<RepositoryInfo> repositories,
-                                                           String projectId, String appKey) {
+                                                           String projectId, String appKey, Map<String, MethodNode> repositoryMethodIndex) {
         Set<RepositoryClassNode> nodes = new HashSet<>();
         if (repositories == null) return nodes;
 
@@ -258,7 +312,27 @@ public class GraphPersistenceService {
             if (repository.getDatabaseOperations() != null) {
                 DatabaseTableNode tableNode = buildDatabaseTableNode(
                         repository.getDatabaseOperations(), projectId, appKey);
-                repoNode.setAccessesTable(tableNode);
+                repoNode.getAccessesTables().add(tableNode);
+            }
+
+            // Index repository methods by multiple keys for robust resolution
+            String fullClassName = repository.getPackageName() != null
+                    ? repository.getPackageName() + "." + repository.getClassName()
+                    : repository.getClassName();
+            for (MethodNode methodNode : methodNodes) {
+                if (methodNode.getSignature() != null) {
+                    repositoryMethodIndex.put(methodNode.getSignature(), methodNode);
+                }
+                String keySimple = buildMethodKey(methodNode.getClassName(), methodNode.getMethodName());
+                if (keySimple != null) {
+                    repositoryMethodIndex.put(keySimple, methodNode);
+                }
+                String keyFqcn = buildMethodKey(fullClassName, methodNode.getMethodName());
+                if (keyFqcn != null) {
+                    repositoryMethodIndex.put(keyFqcn, methodNode);
+                }
+                // Method-name-only fallback (may be overwritten; used only when unique)
+                repositoryMethodIndex.putIfAbsent(methodNode.getMethodName(), methodNode);
             }
 
             nodes.add(repoNode);
@@ -347,7 +421,20 @@ public class GraphPersistenceService {
 
             // Build Kafka topic consumption relationship
             if (method.getTopic() != null && !method.getTopic().isEmpty()) {
-                KafkaTopicNode topicNode = getOrCreateKafkaTopic(method.getTopic(), projectId);
+                KafkaTopicNode topicNode = getOrCreateKafkaTopic(method.getTopic(), projectId, appKey);
+
+                // Add consumer metadata to topic node
+                String detail = String.format("%s.%s (line %d)",
+                        listenerClass,
+                        method.getMethodName(),
+                        method.getLine() != null ? method.getLine().getStart() : 0);
+                if (!topicNode.getConsumerDetails().contains(detail)) {
+                    topicNode.getConsumerDetails().add(detail);
+                }
+                if (!topicNode.getConsumerServiceNames().contains(listenerClass)) {
+                    topicNode.getConsumerServiceNames().add(listenerClass);
+                }
+
                 methodNode.getConsumesFromTopics().add(topicNode);
             }
 
@@ -413,10 +500,22 @@ public class GraphPersistenceService {
 
     private Set<MethodNode> buildMethodNodesFromCalls(List<MethodCall> calls, String projectId,
                                                        String appKey, String methodType) {
+        return buildMethodNodesFromCalls(calls, projectId, appKey, methodType, new HashSet<>());
+    }
+
+    private Set<MethodNode> buildMethodNodesFromCalls(List<MethodCall> calls, String projectId,
+                                                       String appKey, String methodType, Set<String> seen) {
         Set<MethodNode> nodes = new HashSet<>();
         if (calls == null) return nodes;
 
         for (MethodCall call : calls) {
+            String key = buildMethodKey(call.getClassName(), call.getHandlerMethod());
+            if (key == null) key = call.getSignature();
+            if (key != null && !seen.add(key)) {
+                // Already visited this method in the current path; avoid cycles
+                continue;
+            }
+
             MethodNode methodNode = MethodNode.builder()
                     .className(call.getClassName())
                     .methodName(call.getHandlerMethod())
@@ -434,9 +533,9 @@ public class GraphPersistenceService {
                 methodNode.setLineEnd(call.getLine().getEnd());
             }
 
-            // Recursively build nested calls
+            // Recursively build nested calls with cycle detection
             Set<MethodNode> nestedCalls = buildMethodNodesFromCalls(
-                    call.getCalls(), projectId, appKey, methodType);
+                    call.getCalls(), projectId, appKey, methodType, new HashSet<>(seen));
             methodNode.getCalls().addAll(nestedCalls);
 
             // Build external calls
@@ -539,20 +638,50 @@ public class GraphPersistenceService {
         if (kafkaCalls == null) return nodes;
 
         for (KafkaCallInfo kafkaCall : kafkaCalls) {
-            if (direction.equals(kafkaCall.getDirection()) && kafkaCall.getTopic() != null) {
-                KafkaTopicNode topicNode = getOrCreateKafkaTopic(kafkaCall.getTopic(), projectId);
-                nodes.add(topicNode);
+            if (!direction.equals(kafkaCall.getDirection())) continue;
+
+            String topicName = kafkaCall.getResolvedTopic() != null && !kafkaCall.getResolvedTopic().isEmpty()
+                    ? kafkaCall.getResolvedTopic()
+                    : kafkaCall.getRawTopic();
+            if (topicName == null || topicName.isEmpty()) continue;
+
+            KafkaTopicNode topicNode = getOrCreateKafkaTopic(topicName, projectId, kafkaCall.getClientType());
+
+            // Add producer/consumer metadata to the topic node
+            String detail = String.format("%s.%s (line %d)",
+                    kafkaCall.getClassName(),
+                    kafkaCall.getMethodName(),
+                    kafkaCall.getLine() != null ? kafkaCall.getLine().getStart() : 0);
+
+            if ("PRODUCER".equals(direction)) {
+                if (!topicNode.getProducerDetails().contains(detail)) {
+                    topicNode.getProducerDetails().add(detail);
+                }
+                String serviceName = kafkaCall.getClassName();
+                if (serviceName != null && !topicNode.getProducerServiceNames().contains(serviceName)) {
+                    topicNode.getProducerServiceNames().add(serviceName);
+                }
+            } else if ("CONSUMER".equals(direction)) {
+                if (!topicNode.getConsumerDetails().contains(detail)) {
+                    topicNode.getConsumerDetails().add(detail);
+                }
+                String serviceName = kafkaCall.getClassName();
+                if (serviceName != null && !topicNode.getConsumerServiceNames().contains(serviceName)) {
+                    topicNode.getConsumerServiceNames().add(serviceName);
+                }
             }
+
+            nodes.add(topicNode);
         }
         return nodes;
     }
 
-    private KafkaTopicNode getOrCreateKafkaTopic(String topicName, String projectId) {
-        // Try to find existing topic or create new one
-        return kafkaTopicNodeRepository.findByName(topicName)
+    private KafkaTopicNode getOrCreateKafkaTopic(String topicName, String projectId, String appKey) {
+        return kafkaTopicNodeRepository.findByProjectIdAndName(projectId, topicName)
                 .orElseGet(() -> KafkaTopicNode.builder()
                         .name(topicName)
                         .projectId(projectId)
+                        .appKey(appKey)
                         .build());
     }
 
@@ -578,5 +707,112 @@ public class GraphPersistenceService {
             return "/" + cleanPath.substring(0, firstSlash);
         }
         return "/" + cleanPath;
+    }
+
+    private MethodNode resolveServiceMethod(MethodCall call, Map<String, MethodNode> serviceMethodIndex) {
+        if (call == null || serviceMethodIndex == null) {
+            return null;
+        }
+
+        if (call.getSignature() != null) {
+            MethodNode bySignature = serviceMethodIndex.get(call.getSignature());
+            if (bySignature != null) {
+                return bySignature;
+            }
+        }
+
+        String key = buildMethodKey(call.getClassName(), call.getHandlerMethod());
+        if (key != null) {
+            MethodNode byKey = serviceMethodIndex.get(key);
+            if (byKey != null) {
+                return byKey;
+            }
+        }
+
+        // Fallback: if className is absent but method name is unique across services, use that
+        if (call.getHandlerMethod() != null) {
+            List<MethodNode> byName = serviceMethodIndex.values().stream()
+                    .filter(node -> Objects.equals(node.getMethodName(), call.getHandlerMethod()))
+                    .distinct()
+                    .toList();
+            if (byName.size() == 1) {
+                return byName.get(0);
+            }
+        }
+
+        return serviceMethodIndex.values().stream()
+                .filter(node -> Objects.equals(node.getClassName(), call.getClassName())
+                        && Objects.equals(node.getMethodName(), call.getHandlerMethod()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private MethodNode resolveServiceMethodFromInfo(MethodInfo methodInfo, Map<String, MethodNode> serviceMethodIndex, String primaryClassName, String secondaryClassName) {
+        if (methodInfo == null || serviceMethodIndex == null) {
+            return null;
+        }
+
+        // First, try to resolve by signature
+        if (methodInfo.getSignature() != null) {
+            MethodNode bySignature = serviceMethodIndex.get(methodInfo.getSignature());
+            if (bySignature != null) {
+                return bySignature;
+            }
+        }
+
+        // Then, try to resolve by className and methodName using both class qualifiers
+        String keyPrimary = buildMethodKey(primaryClassName, methodInfo.getMethodName());
+        if (keyPrimary != null) {
+            MethodNode byKey = serviceMethodIndex.get(keyPrimary);
+            if (byKey != null) {
+                return byKey;
+            }
+        }
+
+        String keySecondary = buildMethodKey(secondaryClassName, methodInfo.getMethodName());
+        if (keySecondary != null) {
+            MethodNode byKey = serviceMethodIndex.get(keySecondary);
+            if (byKey != null) {
+                return byKey;
+            }
+        }
+
+        // Fallback: unique method-name match
+        return serviceMethodIndex.values().stream()
+                .filter(node -> Objects.equals(node.getMethodName(), methodInfo.getMethodName()))
+                .reduce((a, b) -> null)
+                .orElse(null);
+    }
+
+    private MethodNode resolveRepositoryMethod(MethodCall call, Map<String, MethodNode> repositoryMethodIndex) {
+        if (call == null || repositoryMethodIndex == null) {
+            return null;
+        }
+
+        // Try to resolve repository method by signature
+        if (call.getSignature() != null) {
+            MethodNode bySignature = repositoryMethodIndex.get(call.getSignature());
+            if (bySignature != null) {
+                return bySignature;
+            }
+        }
+
+        // Try to resolve repository method by className and methodName
+        String key = buildMethodKey(call.getClassName(), call.getHandlerMethod());
+        if (key != null) {
+            MethodNode byKey = repositoryMethodIndex.get(key);
+            if (byKey != null) {
+                return byKey;
+            }
+        }
+
+        return null;
+    }
+
+    private String buildMethodKey(String className, String methodName) {
+        if (className == null || methodName == null) {
+            return null;
+        }
+        return className + "#" + methodName;
     }
 }

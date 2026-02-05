@@ -69,7 +69,7 @@ public class GraphVisualizationService {
 
         // Count database tables from repositories
         long databaseTablesCount = repositories.stream()
-                .filter(r -> r.getAccessesTable() != null)
+                .filter(r -> r.getAccessesTables() != null && !r.getAccessesTables().isEmpty())
                 .count();
 
         // Count configurations - get from apps
@@ -126,9 +126,7 @@ public class GraphVisualizationService {
                 .endpointsByMethod(endpointsByMethod)
                 .repositoriesByType(repositoriesByType)
                 .applications(appSummaries)
-                .totalConfigurations(0)
-                .totalDatabaseTables(0).
-                build();
+                .build();
     }
 
     /**
@@ -241,10 +239,11 @@ public class GraphVisualizationService {
                     addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), repo.getId(), "CONTAINS_REPOSITORY"));
 
                     // Add database table if exists
-                    if (repo.getAccessesTable() != null && shouldIncludeType(nodeTypes, "DatabaseTable")) {
-                        GraphNode tableNode = convertDatabaseTableToGraphNode(repo.getAccessesTable());
+                    if (repo.getAccessesTables() != null && !repo.getAccessesTables().isEmpty() && shouldIncludeType(nodeTypes, "DatabaseTable")) {
+                        DatabaseTableNode table = repo.getAccessesTables().iterator().next();
+                        GraphNode tableNode = convertDatabaseTableToGraphNode(table);
                         addNodeIfNotExists(nodes, addedNodeIds, tableNode);
-                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), repo.getAccessesTable().getId(), "ACCESSES"));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
                     }
                 }
             }
@@ -590,10 +589,11 @@ public class GraphVisualizationService {
             GraphNode repoNode = convertRepositoryToGraphNode(repo);
             addNodeIfNotExists(nodes, addedNodeIds, repoNode);
 
-            if (repo.getAccessesTable() != null) {
-                GraphNode tableNode = convertDatabaseTableToGraphNode(repo.getAccessesTable());
+            if (repo.getAccessesTables() != null && !repo.getAccessesTables().isEmpty()) {
+                DatabaseTableNode table = repo.getAccessesTables().iterator().next();
+                GraphNode tableNode = convertDatabaseTableToGraphNode(table);
                 addNodeIfNotExists(nodes, addedNodeIds, tableNode);
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), repo.getAccessesTable().getId(), "ACCESSES"));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
             }
         }
 
