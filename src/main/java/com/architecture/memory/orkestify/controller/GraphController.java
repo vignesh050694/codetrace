@@ -198,14 +198,12 @@ public class GraphController {
      *             DatabaseTable, KafkaTopic, KafkaListener
      */
     @Operation(summary = "Get nodes by type",
-               description = "Returns all nodes of a specific type in the project. " +
-                           "Supported types: Application, Controller, Endpoint, Service, Method, " +
-                           "Repository, DatabaseTable, KafkaTopic, KafkaListener")
+               description = "Returns all nodes of a specific type in the project. ")
     @GetMapping("/nodes")
     public ResponseEntity<NodeListResponse> getNodesByType(
             @PathVariable String projectId,
             @Parameter(description = "Node type to filter by", required = true,
-                       example = "Service")
+                       example = "SERVICE")
             @RequestParam String type) {
         log.info("Getting nodes by type for project: {}, type: {}", projectId, type);
         validateProjectAccess(projectId);
