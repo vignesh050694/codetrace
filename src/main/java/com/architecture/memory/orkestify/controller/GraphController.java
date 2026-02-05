@@ -9,6 +9,9 @@ import com.architecture.memory.orkestify.repository.UserRepository;
 import com.architecture.memory.orkestify.service.graph.GraphQueryService;
 import com.architecture.memory.orkestify.service.graph.GraphVisualizationService;
 import com.architecture.memory.orkestify.service.graph.HierarchyService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -181,6 +184,55 @@ public class GraphController {
         validateProjectAccess(projectId);
 
         GraphVisualizationResponse response = graphVisualizationService.buildDatabaseAccessGraph(projectId);
+        return ResponseEntity.ok(response);
+    }
+
+    // ==================== Node Query APIs ====================
+
+    /**
+     * Get all nodes of a specific type.
+     * Returns only nodes (no edges) for the specified type.
+     *
+     * @param projectId The project ID
+     * @param type Node type: Application, Controller, Endpoint, Service, Method, Repository,
+     *             DatabaseTable, KafkaTopic, KafkaListener
+     */
+    @Operation(summary = "Get nodes by type",
+               description = "Returns all nodes of a specific type in the project. " +
+                           "Supported types: Application, Controller, Endpoint, Service, Method, " +
+                           "Repository, DatabaseTable, KafkaTopic, KafkaListener")
+    @GetMapping("/nodes")
+    public ResponseEntity<NodeListResponse> getNodesByType(
+            @PathVariable String projectId,
+            @Parameter(description = "Node type to filter by", required = true,
+                       example = "Service")
+            @RequestParam String type) {
+        log.info("Getting nodes by type for project: {}, type: {}", projectId, type);
+        validateProjectAccess(projectId);
+
+        NodeListResponse response = graphVisualizationService.getNodesByType(projectId, type);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Get a node by ID with its related nodes and edges for visualization.
+     * Returns the specified node along with all directly connected nodes and their relationships.
+     *
+     * @param projectId The project ID
+     * @param nodeId The unique ID of the node
+     */
+    @Operation(summary = "Get node graph by ID",
+               description = "Returns the specified node with all its immediate neighbors (connected nodes) " +
+                           "and the edges between them. Useful for visualizing a node's context in the graph.")
+    @GetMapping("/nodes/{nodeId}")
+    public ResponseEntity<GraphVisualizationResponse> getNodeGraphById(
+            @PathVariable String projectId,
+            @Parameter(description = "The unique ID of the node", required = true)
+            @PathVariable String nodeId) {
+        log.info("Getting node graph by ID for project: {}, nodeId: {}", projectId, nodeId);
+        validateProjectAccess(projectId);
+
+        GraphVisualizationResponse response = graphVisualizationService.getNodeGraphById(projectId, nodeId);
         return ResponseEntity.ok(response);
     }
 
