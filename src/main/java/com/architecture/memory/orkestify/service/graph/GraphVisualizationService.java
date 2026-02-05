@@ -775,6 +775,8 @@ public class GraphVisualizationService {
             return buildFinalResponse(nodes, edges, projectId);
         }
 
+
+
         // Node not found
         log.warn("Node not found with ID: {}", nodeId);
         return buildEmptyResponse(projectId);
