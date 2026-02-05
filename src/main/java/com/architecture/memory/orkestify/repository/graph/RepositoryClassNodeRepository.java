@@ -18,6 +18,11 @@ public interface RepositoryClassNodeRepository extends Neo4jRepository<Repositor
 
     Optional<RepositoryClassNode> findByProjectIdAndClassName(String projectId, String className);
 
+    @Query("MATCH (r:RepositoryClass {projectId: $projectId, className: $className}) " +
+           "OPTIONAL MATCH (r)-[:ACCESSES]->(t:DatabaseTable) " +
+           "RETURN r, collect(t) as accessesTables")
+    Optional<RepositoryClassNode> findByProjectIdAndClassNameWithTables(String projectId, String className);
+
     List<RepositoryClassNode> findByProjectIdAndRepositoryType(String projectId, String repositoryType);
 
     @Query("MATCH (r:RepositoryClass {className: $className, packageName: $packageName, projectId: $projectId}) " +
