@@ -215,15 +215,16 @@ public class GraphController {
     }
 
     /**
-     * Get a node by ID with its related nodes and edges for visualization.
-     * Returns the specified node along with all directly connected nodes and their relationships.
+     * Get a node by ID with complete depth traversal for visualization.
+     * Returns the specified node along with ALL downstream dependencies recursively.
      *
      * @param projectId The project ID
      * @param nodeId The unique ID of the node
      */
     @Operation(summary = "Get node graph by ID",
-               description = "Returns the specified node with all its immediate neighbors (connected nodes) " +
-                           "and the edges between them. Useful for visualizing a node's context in the graph.")
+               description = "Returns the specified node with complete depth traversal - all downstream " +
+                           "dependencies are included recursively. For example, an Endpoint will include " +
+                           "all called Methods, their called Methods, External calls, Kafka topics, etc.")
     @GetMapping("/nodes/{nodeId}")
     public ResponseEntity<GraphVisualizationResponse> getNodeGraphById(
             @PathVariable String projectId,
