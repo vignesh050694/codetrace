@@ -5,6 +5,7 @@ import com.architecture.memory.orkestify.model.graph.nodes.*;
 import com.architecture.memory.orkestify.repository.graph.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.neo4j.core.Neo4jClient;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -27,6 +28,7 @@ public class GraphVisualizationService {
     private final RepositoryClassNodeRepository repositoryClassNodeRepository;
     private final KafkaTopicNodeRepository kafkaTopicNodeRepository;
     private final KafkaListenerNodeRepository kafkaListenerNodeRepository;
+    private final Neo4jClient neo4jClient;
 
     // Node type colors for visualization
     private static final Map<String, String> NODE_COLORS = Map.of(
@@ -602,6 +604,539 @@ public class GraphVisualizationService {
                 .nodes(nodes)
                 .edges(edges)
                 .metadata(metadata)
+                .build();
+    }
+
+    // ==================== Node Query APIs ====================
+
+    /**
+     * Get all nodes of a specific type in a project.
+     * Supported types: Application, Controller, Endpoint, Service, Method, Repository,
+     * DatabaseTable, KafkaTopic, KafkaListener, Configuration, ExternalCall
+     */
+    public NodeListResponse getNodesByType(String projectId, String nodeType) {
+        log.info("Getting nodes by type for project: {}, type: {}", projectId, nodeType);
+
+        List<GraphNode> nodes = new ArrayList<>();
+
+        switch (nodeType) {
+            case "Application":
+                List<ApplicationNode> apps = applicationNodeRepository.findByProjectId(projectId);
+                nodes = apps.stream().map(this::convertApplicationToGraphNode).collect(Collectors.toList());
+                break;
+            case "Controller":
+                List<ControllerNode> controllers = controllerNodeRepository.findByProjectId(projectId);
+                nodes = controllers.stream().map(this::convertControllerToGraphNode).collect(Collectors.toList());
+                break;
+            case "Endpoint":
+                List<EndpointNode> endpoints = endpointNodeRepository.findByProjectId(projectId);
+                nodes = endpoints.stream().map(this::convertEndpointToGraphNode).collect(Collectors.toList());
+                break;
+            case "Service":
+                List<ServiceNode> services = serviceNodeRepository.findByProjectId(projectId);
+                nodes = services.stream().map(this::convertServiceToGraphNode).collect(Collectors.toList());
+                break;
+            case "Method":
+                List<MethodNode> methods = methodNodeRepository.findByProjectId(projectId);
+                nodes = methods.stream().map(this::convertMethodToGraphNode).collect(Collectors.toList());
+                break;
+            case "Repository":
+                List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectId(projectId);
+                nodes = repositories.stream().map(this::convertRepositoryToGraphNode).collect(Collectors.toList());
+                break;
+            case "KafkaTopic":
+                List<KafkaTopicNode> topics = kafkaTopicNodeRepository.findByProjectId(projectId);
+                nodes = topics.stream().map(this::convertKafkaTopicToGraphNode).collect(Collectors.toList());
+                break;
+            case "KafkaListener":
+                List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectId(projectId);
+                nodes = listeners.stream().map(this::convertKafkaListenerToGraphNode).collect(Collectors.toList());
+                break;
+            case "DatabaseTable":
+                List<RepositoryClassNode> reposWithTables = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
+                for (RepositoryClassNode repo : reposWithTables) {
+                    if (repo.getAccessesTables() != null) {
+                        for (DatabaseTableNode table : repo.getAccessesTables()) {
+                            nodes.add(convertDatabaseTableToGraphNode(table));
+                        }
+                    }
+                }
+                break;
+            default:
+                log.warn("Unknown node type: {}", nodeType);
+        }
+
+        return NodeListResponse.builder()
+                .nodes(nodes)
+                .nodeType(nodeType)
+                .totalCount(nodes.size())
+                .projectId(projectId)
+                .build();
+    }
+
+    /**
+     * Get a node by its ID with all related nodes and edges for visualization.
+     * Returns the node and its immediate neighbors (both incoming and outgoing relationships).
+     */
+    public GraphVisualizationResponse getNodeGraphById(String projectId, String nodeId) {
+        log.info("Getting node graph by ID for project: {}, nodeId: {}", projectId, nodeId);
+
+        List<GraphNode> nodes = new ArrayList<>();
+        List<GraphEdge> edges = new ArrayList<>();
+        Set<String> addedNodeIds = new HashSet<>();
+        Set<String> addedEdgeIds = new HashSet<>();
+
+        // Try to find the node in each repository and build the graph
+        // First, try Application
+        Optional<ApplicationNode> appOpt = applicationNodeRepository.findById(nodeId);
+        if (appOpt.isPresent()) {
+            ApplicationNode app = appOpt.get();
+            if (!projectId.equals(app.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildApplicationNodeGraph(app, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try Controller
+        Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByIdWithFullDetails(nodeId);
+        if (ctrlOpt.isPresent()) {
+            ControllerNode controller = ctrlOpt.get();
+            if (!projectId.equals(controller.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildControllerNodeGraph(controller, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try Endpoint
+        Optional<EndpointNode> endptOpt = endpointNodeRepository.findByIdWithFullCallChain(nodeId);
+        if (endptOpt.isPresent()) {
+            EndpointNode endpoint = endptOpt.get();
+            if (!projectId.equals(endpoint.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildEndpointNodeGraph(endpoint, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try Service
+        Optional<ServiceNode> svcOpt = serviceNodeRepository.findByIdWithFullDetails(nodeId);
+        if (svcOpt.isPresent()) {
+            ServiceNode service = svcOpt.get();
+            if (!projectId.equals(service.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildServiceNodeGraph(service, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try Method
+        Optional<MethodNode> methodOpt = methodNodeRepository.findById(nodeId);
+        if (methodOpt.isPresent()) {
+            MethodNode method = methodOpt.get();
+            if (!projectId.equals(method.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildMethodNodeGraph(method, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try KafkaTopic
+        Optional<KafkaTopicNode> topicOpt = kafkaTopicNodeRepository.findById(nodeId);
+        if (topicOpt.isPresent()) {
+            KafkaTopicNode topic = topicOpt.get();
+            if (!projectId.equals(topic.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildKafkaTopicNodeGraph(topic, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try KafkaListener
+        Optional<KafkaListenerNode> listenerOpt = kafkaListenerNodeRepository.findById(nodeId);
+        if (listenerOpt.isPresent()) {
+            KafkaListenerNode listener = listenerOpt.get();
+            if (!projectId.equals(listener.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildKafkaListenerNodeGraph(listener, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Try Repository
+        Optional<RepositoryClassNode> repoOpt = repositoryClassNodeRepository.findById(nodeId);
+        if (repoOpt.isPresent()) {
+            RepositoryClassNode repo = repoOpt.get();
+            if (!projectId.equals(repo.getProjectId())) {
+                return buildEmptyResponse(projectId);
+            }
+            return buildRepositoryNodeGraph(repo, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+
+        // Node not found
+        log.warn("Node not found with ID: {}", nodeId);
+        return buildEmptyResponse(projectId);
+    }
+
+    private GraphVisualizationResponse buildEmptyResponse(String projectId) {
+        return GraphVisualizationResponse.builder()
+                .nodes(Collections.emptyList())
+                .edges(Collections.emptyList())
+                .metadata(buildMetadata(Collections.emptyList(), Collections.emptyList(), projectId, 1))
+                .build();
+    }
+
+    private GraphVisualizationResponse buildApplicationNodeGraph(ApplicationNode app, String projectId,
+                                                                  List<GraphNode> nodes, List<GraphEdge> edges,
+                                                                  Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        // Add the application node
+        addNodeIfNotExists(nodes, addedNodeIds, convertApplicationToGraphNode(app));
+
+        // Get related nodes - controllers, services, repositories, kafka listeners
+        List<ControllerNode> controllers = controllerNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        for (ControllerNode ctrl : controllers) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), ctrl.getId(), "CONTAINS_CONTROLLER"));
+        }
+
+        List<ServiceNode> services = serviceNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        for (ServiceNode svc : services) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertServiceToGraphNode(svc));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), svc.getId(), "CONTAINS_SERVICE"));
+        }
+
+        List<RepositoryClassNode> repos = repositoryClassNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        for (RepositoryClassNode repo : repos) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), repo.getId(), "CONTAINS_REPOSITORY"));
+        }
+
+        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdAndAppKey(projectId, app.getAppKey());
+        for (KafkaListenerNode listener : listeners) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertKafkaListenerToGraphNode(listener));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), listener.getId(), "CONTAINS_KAFKA_LISTENER"));
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildControllerNodeGraph(ControllerNode controller, String projectId,
+                                                                 List<GraphNode> nodes, List<GraphEdge> edges,
+                                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(controller));
+
+        // Add parent application
+        Optional<ApplicationNode> appOpt = applicationNodeRepository.findByProjectIdAndAppKey(projectId, controller.getAppKey());
+        appOpt.ifPresent(app -> {
+            addNodeIfNotExists(nodes, addedNodeIds, convertApplicationToGraphNode(app));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), controller.getId(), "CONTAINS_CONTROLLER"));
+        });
+
+        // Add endpoints
+        if (controller.getEndpoints() != null) {
+            for (EndpointNode endpoint : controller.getEndpoints()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(controller.getId(), endpoint.getId(), "HAS_ENDPOINT"));
+            }
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildEndpointNodeGraph(EndpointNode endpoint, String projectId,
+                                                               List<GraphNode> nodes, List<GraphEdge> edges,
+                                                               Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+
+        // Add parent controller
+        if (endpoint.getControllerClass() != null) {
+            Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByProjectIdAndClassName(projectId, endpoint.getControllerClass());
+            ctrlOpt.ifPresent(ctrl -> {
+                addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(ctrl.getId(), endpoint.getId(), "HAS_ENDPOINT"));
+            });
+        }
+
+        // Add called methods
+        if (endpoint.getCalls() != null) {
+            for (MethodNode method : endpoint.getCalls()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), method.getId(), "CALLS"));
+            }
+        }
+
+        // Add external calls
+        if (endpoint.getExternalCalls() != null) {
+            for (ExternalCallNode extCall : endpoint.getExternalCalls()) {
+                GraphNode extCallNode = convertExternalCallToGraphNode(extCall);
+                addNodeIfNotExists(nodes, addedNodeIds, extCallNode);
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+            }
+        }
+
+        // Add Kafka topics
+        if (endpoint.getProducesToTopics() != null) {
+            for (KafkaTopicNode topic : endpoint.getProducesToTopics()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), topic.getId(), "PRODUCES_TO"));
+            }
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildServiceNodeGraph(ServiceNode service, String projectId,
+                                                              List<GraphNode> nodes, List<GraphEdge> edges,
+                                                              Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertServiceToGraphNode(service));
+
+        // Add parent application
+        Optional<ApplicationNode> appOpt = applicationNodeRepository.findByProjectIdAndAppKey(projectId, service.getAppKey());
+        appOpt.ifPresent(app -> {
+            addNodeIfNotExists(nodes, addedNodeIds, convertApplicationToGraphNode(app));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), service.getId(), "CONTAINS_SERVICE"));
+        });
+
+        // Add methods
+        if (service.getMethods() != null) {
+            for (MethodNode method : service.getMethods()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(service.getId(), method.getId(), "HAS_METHOD"));
+            }
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildMethodNodeGraph(MethodNode method, String projectId,
+                                                             List<GraphNode> nodes, List<GraphEdge> edges,
+                                                             Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(method));
+
+        // Add parent service if method belongs to one
+        if (method.getClassName() != null) {
+            Optional<ServiceNode> svcOpt = serviceNodeRepository.findByProjectIdAndClassName(projectId, method.getClassName());
+            svcOpt.ifPresent(svc -> {
+                addNodeIfNotExists(nodes, addedNodeIds, convertServiceToGraphNode(svc));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(svc.getId(), method.getId(), "HAS_METHOD"));
+            });
+        }
+
+        // Add called methods
+        if (method.getCalls() != null) {
+            for (MethodNode calledMethod : method.getCalls()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(calledMethod));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), calledMethod.getId(), "CALLS"));
+            }
+        }
+
+        // Add callers (methods that call this method)
+        List<MethodNode> callers = methodNodeRepository.findCallersOf(projectId, method.getSignature());
+        for (MethodNode caller : callers) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertMethodToGraphNode(caller));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(caller.getId(), method.getId(), "CALLS"));
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildKafkaTopicNodeGraph(KafkaTopicNode topic, String projectId,
+                                                                 List<GraphNode> nodes, List<GraphEdge> edges,
+                                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+
+        // Find producers - endpoints that produce to this topic
+        List<EndpointNode> endpoints = endpointNodeRepository.findByProjectId(projectId);
+        for (EndpointNode endpoint : endpoints) {
+            if (endpoint.getProducesToTopics() != null) {
+                for (KafkaTopicNode t : endpoint.getProducesToTopics()) {
+                    if (t.getId().equals(topic.getId())) {
+                        addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), topic.getId(), "PRODUCES_TO"));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Find consumers - kafka listeners that consume from this topic
+        List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectIdWithListenerMethods(projectId);
+        for (KafkaListenerNode listener : listeners) {
+            if (listener.getListenerMethods() != null) {
+                for (KafkaListenerMethodNode method : listener.getListenerMethods()) {
+                    if (method.getConsumesFromTopics() != null) {
+                        for (KafkaTopicNode t : method.getConsumesFromTopics()) {
+                            if (t.getId().equals(topic.getId())) {
+                                GraphNode consumerNode = GraphNode.builder()
+                                        .id(method.getId())
+                                        .label(listener.getClassName() + "." + method.getMethodName())
+                                        .type("KafkaListenerMethod")
+                                        .group(listener.getPackageName())
+                                        .properties(Map.of(
+                                                "className", listener.getClassName(),
+                                                "methodName", method.getMethodName(),
+                                                "groupId", method.getGroupId() != null ? method.getGroupId() : ""))
+                                        .style(NodeStyle.builder()
+                                                .color("#F44336")
+                                                .shape("rectangle")
+                                                .icon("listener")
+                                                .build())
+                                        .build();
+                                addNodeIfNotExists(nodes, addedNodeIds, consumerNode);
+                                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(topic.getId(), method.getId(), "CONSUMED_BY"));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildKafkaListenerNodeGraph(KafkaListenerNode listener, String projectId,
+                                                                    List<GraphNode> nodes, List<GraphEdge> edges,
+                                                                    Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertKafkaListenerToGraphNode(listener));
+
+        // Add parent application
+        Optional<ApplicationNode> appOpt = applicationNodeRepository.findByProjectIdAndAppKey(projectId, listener.getAppKey());
+        appOpt.ifPresent(app -> {
+            addNodeIfNotExists(nodes, addedNodeIds, convertApplicationToGraphNode(app));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), listener.getId(), "CONTAINS_KAFKA_LISTENER"));
+        });
+
+        // Add listener methods and their topics
+        if (listener.getListenerMethods() != null) {
+            for (KafkaListenerMethodNode method : listener.getListenerMethods()) {
+                GraphNode methodNode = GraphNode.builder()
+                        .id(method.getId())
+                        .label(method.getMethodName())
+                        .type("KafkaListenerMethod")
+                        .group(listener.getClassName())
+                        .properties(Map.of(
+                                "methodName", method.getMethodName(),
+                                "signature", method.getSignature() != null ? method.getSignature() : "",
+                                "groupId", method.getGroupId() != null ? method.getGroupId() : ""))
+                        .style(NodeStyle.builder()
+                                .color("#F44336")
+                                .shape("rectangle")
+                                .icon("listener-method")
+                                .build())
+                        .build();
+                addNodeIfNotExists(nodes, addedNodeIds, methodNode);
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(listener.getId(), method.getId(), "HAS_LISTENER_METHOD"));
+
+                // Add consumed topics
+                if (method.getConsumesFromTopics() != null) {
+                    for (KafkaTopicNode topic : method.getConsumesFromTopics()) {
+                        addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(topic.getId(), method.getId(), "CONSUMED_BY"));
+                    }
+                }
+            }
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphVisualizationResponse buildRepositoryNodeGraph(RepositoryClassNode repo, String projectId,
+                                                                 List<GraphNode> nodes, List<GraphEdge> edges,
+                                                                 Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
+
+        // Add parent application
+        Optional<ApplicationNode> appOpt = applicationNodeRepository.findByProjectIdAndAppKey(projectId, repo.getAppKey());
+        appOpt.ifPresent(app -> {
+            addNodeIfNotExists(nodes, addedNodeIds, convertApplicationToGraphNode(app));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(app.getId(), repo.getId(), "CONTAINS_REPOSITORY"));
+        });
+
+        // Add database tables
+        if (repo.getAccessesTables() != null) {
+            for (DatabaseTableNode table : repo.getAccessesTables()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
+            }
+        }
+
+        GraphMetadata metadata = buildMetadata(nodes, edges, projectId, 1);
+        return GraphVisualizationResponse.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .metadata(metadata)
+                .build();
+    }
+
+    private GraphNode convertKafkaTopicToGraphNode(KafkaTopicNode topic) {
+        Map<String, Object> props = new HashMap<>();
+        props.put("name", topic.getName());
+
+        return GraphNode.builder()
+                .id(topic.getId())
+                .label(topic.getName())
+                .type("KafkaTopic")
+                .group("topics")
+                .properties(props)
+                .style(NodeStyle.builder()
+                        .color(NODE_COLORS.get("KafkaTopic"))
+                        .shape("diamond")
+                        .size(40)
+                        .icon("kafka")
+                        .build())
+                .build();
+    }
+
+    private GraphNode convertExternalCallToGraphNode(ExternalCallNode extCall) {
+        Map<String, Object> props = new HashMap<>();
+        props.put("httpMethod", extCall.getHttpMethod() != null ? extCall.getHttpMethod() : "UNKNOWN");
+        props.put("url", extCall.getUrl() != null ? extCall.getUrl() : "");
+        props.put("clientType", extCall.getClientType() != null ? extCall.getClientType() : "");
+        props.put("resolved", extCall.isResolved());
+
+        return GraphNode.builder()
+                .id(extCall.getId())
+                .label((extCall.getHttpMethod() != null ? extCall.getHttpMethod() : "?") + " " +
+                       (extCall.getUrl() != null ? extCall.getUrl() : ""))
+                .type("ExternalCall")
+                .group("external")
+                .properties(props)
+                .style(NodeStyle.builder()
+                        .color(extCall.isResolved() ? "#4CAF50" : "#F44336")
+                        .shape("hexagon")
+                        .size(25)
+                        .icon("external-call")
+                        .build())
                 .build();
     }
 
