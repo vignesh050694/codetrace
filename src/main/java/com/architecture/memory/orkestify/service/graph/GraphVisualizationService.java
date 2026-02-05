@@ -1141,6 +1141,7 @@ public class GraphVisualizationService {
     /**
      * Process a method and all its downstream dependencies recursively.
      * Uses addedNodeIds to prevent infinite loops from circular dependencies.
+     * Also handles repository methods and their database table access.
      */
     private void processMethodFull(MethodNode method, String parentId, String edgeType, String projectId,
                                    List<GraphNode> nodes, List<GraphEdge> edges,
@@ -1171,6 +1172,30 @@ public class GraphVisualizationService {
             for (KafkaTopicNode topic : method.getProducesToTopics()) {
                 addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), topic.getId(), "PRODUCES_TO"));
+            }
+        }
+
+        // Check if this method belongs to a Repository and add database tables
+        if (isNewNode && method.getClassName() != null) {
+            // Check if method type indicates it's a repository method
+            String methodType = method.getMethodType();
+            if ("REPOSITORY_METHOD".equals(methodType) || method.getClassName().endsWith("Repository")) {
+                // Use the query that loads database tables along with the repository
+                Optional<RepositoryClassNode> repoOpt = repositoryClassNodeRepository
+                        .findByProjectIdAndClassNameWithTables(projectId, method.getClassName());
+                repoOpt.ifPresent(repo -> {
+                    // Add repository node if not already added
+                    addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
+                    addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), method.getId(), "HAS_METHOD"));
+
+                    // Add database tables accessed by this repository
+                    if (repo.getAccessesTables() != null) {
+                        for (DatabaseTableNode table : repo.getAccessesTables()) {
+                            addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
+                            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
+                        }
+                    }
+                });
             }
         }
     }
