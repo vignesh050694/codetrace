@@ -235,12 +235,12 @@ public class GraphDiffService {
             RepositoryClassNode shadowRepo = shadowMap.get(key);
             RepositoryClassNode prodRepo = prodMap.get(key);
 
-            String shadowTable = shadowRepo.getAccessesTable() != null
-                    ? shadowRepo.getAccessesTable().getTableName() : null;
+            String shadowTable = shadowRepo.getAccessesTables() != null && !shadowRepo.getAccessesTables().isEmpty()
+                    ? shadowRepo.getAccessesTables().iterator().next().getTableName() : null;
 
             if (prodRepo != null) {
-                String prodTable = prodRepo.getAccessesTable() != null
-                        ? prodRepo.getAccessesTable().getTableName() : null;
+                String prodTable = prodRepo.getAccessesTables() != null && !prodRepo.getAccessesTables().isEmpty()
+                        ? prodRepo.getAccessesTables().iterator().next().getTableName() : null;
 
                 if (shadowTable != null && !shadowTable.equals(prodTable)) {
                     addedRels.add(RelationshipChange.builder()
@@ -268,7 +268,7 @@ public class GraphDiffService {
     }
 
     private Map<String, RepositoryClassNode> buildRepositoryMap(String projectId) {
-        return repositoryClassNodeRepository.findByProjectId(projectId).stream()
+        return repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId).stream()
                 .collect(Collectors.toMap(
                         r -> r.getPackageName() + "." + r.getClassName(),
                         r -> r,
@@ -281,9 +281,10 @@ public class GraphDiffService {
         props.put("packageName", r.getPackageName());
         props.put("repositoryType", r.getRepositoryType());
         props.put("extendsClass", r.getExtendsClass());
-        if (r.getAccessesTable() != null) {
-            props.put("tableName", r.getAccessesTable().getTableName());
-            props.put("entityClass", r.getAccessesTable().getEntityClass());
+        if (r.getAccessesTables() != null && !r.getAccessesTables().isEmpty()) {
+            DatabaseTableNode table = r.getAccessesTables().iterator().next();
+            props.put("tableName", table.getTableName());
+            props.put("entityClass", table.getEntityClass());
         }
         return props;
     }

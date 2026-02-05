@@ -13,8 +13,16 @@ import java.util.List;
 @AllArgsConstructor
 public class KafkaCallInfo {
     private String direction;           // PRODUCER or CONSUMER
-    private String topic;               // Kafka topic name
+
+    // Topic resolution
+    private String rawTopic;            // As found in code (placeholder or literal)
+    private String resolvedTopic;       // After property resolution (if available)
+    private String topic;               // Effective topic used for graph (resolvedTopic fallback to rawTopic)
+    private boolean topicResolved;      // Whether resolution succeeded (no unresolved placeholders)
+
     private String clientType;          // KafkaTemplate, ReactiveKafkaProducerTemplate, @KafkaListener, etc.
+    private String className;           // Declaring class name
+    private String signature;           // Method signature of the producer/consumer
     private String methodName;          // Method that produces/consumes
     private LineRange line;
 

@@ -68,6 +68,19 @@ public class ApplicationDetailResponse {
         private String className;
         private String packageName;
         private int methodsCount;
+        private List<MethodSummary> methods;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class MethodSummary {
+        private String id;
+        private String methodName;
+        private String signature;
+        private Integer lineStart;
+        private Integer lineEnd;
     }
 
     @Data

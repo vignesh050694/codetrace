@@ -162,15 +162,21 @@ public class KafkaAnalyzer {
         for (CtAnnotation<?> annotation : method.getAnnotations()) {
             String annotationName = annotation.getAnnotationType().getSimpleName();
             if (KAFKA_LISTENER_ANNOTATIONS.contains(annotationName)) {
-                String topic = extractTopicFromListenerAnnotation(annotation, properties);
+                TopicResolution resolution = resolveTopic(extractTopicFromListenerAnnotation(annotation, properties), properties);
+                String topic = resolution.effectiveTopic();
                 if (topic != null && !topic.isEmpty()) {
                     String key = "CONSUMER:" + topic + ":" + method.getSimpleName();
                     if (seen.add(key)) {
                         KafkaCallInfo consumer = KafkaCallInfo.builder()
                                 .direction("CONSUMER")
+                                .rawTopic(resolution.rawTopic())
+                                .resolvedTopic(resolution.resolvedTopic())
                                 .topic(topic)
+                                .topicResolved(resolution.resolved())
                                 .clientType(annotationName)
+                                .className(method.getDeclaringType().getQualifiedName())
                                 .methodName(method.getSimpleName())
+                                .signature(method.getSignature())
                                 .line(extractionHelper.createLineRange(method))
                                 .resolved(false)
                                 .build();
@@ -191,14 +197,20 @@ public class KafkaAnalyzer {
             String methodName = execRef.getSimpleName();
 
             if (isKafkaProducerCall(invocation, declaringType, methodName)) {
-                String topic = extractTopicFromProducerCall(invocation, properties, valueFieldMapping, method.getDeclaringType());
+                TopicResolution resolution = extractTopicResolutionFromProducerCall(invocation, properties, valueFieldMapping, method.getDeclaringType());
+                String topic = resolution.effectiveTopic();
                 String key = "PRODUCER:" + topic + ":" + methodName;
                 if (seen.add(key)) {
                     KafkaCallInfo producer = KafkaCallInfo.builder()
                             .direction("PRODUCER")
+                            .rawTopic(resolution.rawTopic())
+                            .resolvedTopic(resolution.resolvedTopic())
                             .topic(topic)
+                            .topicResolved(resolution.resolved())
                             .clientType(determineKafkaClientType(declaringType))
+                            .className(method.getDeclaringType().getQualifiedName())
                             .methodName(methodName)
+                            .signature(method.getSignature())
                             .line(extractionHelper.createLineRange(invocation))
                             .resolved(false)
                             .build();
@@ -208,6 +220,28 @@ public class KafkaAnalyzer {
         });
 
         return kafkaCalls;
+    }
+
+    private TopicResolution extractTopicResolutionFromProducerCall(CtInvocation<?> invocation, Map<String, String> properties,
+                                                                   Map<String, String> valueFieldMapping, CtType<?> declaringClass) {
+        var arguments = invocation.getArguments();
+
+        if (!arguments.isEmpty()) {
+            var firstArg = arguments.get(0);
+            String extracted = extractionHelper.extractStringFromExpression(firstArg, properties, valueFieldMapping, declaringClass);
+            if (extracted != null && !extracted.equals("<dynamic>")) {
+                return resolveTopic(extracted, properties);
+            }
+        }
+
+        String methodName = invocation.getExecutable().getSimpleName();
+        if ("sendDefault".equals(methodName)) {
+            return new TopicResolution("<default-topic>", null, "<default-topic>", true);
+        }
+
+        // Could not resolve; use textual argument or placeholder to avoid <dynamic>
+        String fallback = arguments.isEmpty() ? "<unknown-topic>" : arguments.get(0).toString();
+        return resolveTopic(fallback, properties);
     }
 
     /**
@@ -344,7 +378,7 @@ public class KafkaAnalyzer {
                 return resolvedTopic;
             } else {
                 log.debug("Failed to resolve Kafka topic placeholder: {}", topic);
-                return "<unresolved:" + topic + ">";
+                return topic; // keep placeholder as-is
             }
         }
 
@@ -370,7 +404,7 @@ public class KafkaAnalyzer {
                 }
             }
 
-            return "<unresolved:" + topic + ">";
+            return topic; // unresolved, return raw placeholder
         }
 
         // Case 3: Malformed $property.name format (missing braces)
@@ -389,7 +423,7 @@ public class KafkaAnalyzer {
                 return directValue;
             }
 
-            return "<unresolved:" + topic + ">";
+            return topic; // unresolved, return raw placeholder
         }
 
         // Case 4: Plain string that might be a property key (no $ prefix but has dots)
@@ -471,4 +505,24 @@ public class KafkaAnalyzer {
         String packageName = ctType.getPackage().getQualifiedName();
         return packageName.startsWith(basePackage);
     }
+
+    private TopicResolution resolveTopic(String topicCandidate, Map<String, String> properties) {
+        String raw = topicCandidate;
+        if (raw == null) raw = "";
+
+        String resolved = resolveTopicPlaceholder(raw, properties);
+        String effective = resolved != null ? resolved : raw;
+        boolean resolvedFlag = resolved != null && !containsPlaceholder(effective);
+        if (resolved == null && !containsPlaceholder(raw)) {
+            resolvedFlag = true;
+        }
+        return new TopicResolution(raw, resolved, effective, resolvedFlag);
+    }
+
+    private boolean containsPlaceholder(String topic) {
+        if (topic == null) return false;
+        return topic.contains("${") || topic.contains("#{") || topic.startsWith("<unresolved:");
+    }
+
+    private record TopicResolution(String rawTopic, String resolvedTopic, String effectiveTopic, boolean resolved) {}
 }

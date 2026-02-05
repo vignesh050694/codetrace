@@ -261,7 +261,7 @@ public class SpoonCodeAnalyzer {
                         .className(ctClass.getSimpleName())
                         .packageName(ctClass.getPackage().getQualifiedName())
                         .line(createLineRange(ctClass))
-                        .methods(extractMethods(ctClass, properties, valueFieldMapping))
+                        .methods(extractMethods(ctClass, properties, valueFieldMapping, true))
                         .build())
                 .collect(Collectors.toList());
     }
@@ -269,8 +269,15 @@ public class SpoonCodeAnalyzer {
     private List<MethodInfo> extractMethods(CtType<?> clazz,
                                             Map<String, String> properties,
                                             Map<String, String> valueFieldMapping) {
+        return extractMethods(clazz, properties, valueFieldMapping, false);
+    }
+
+    private List<MethodInfo> extractMethods(CtType<?> clazz,
+                                            Map<String, String> properties,
+                                            Map<String, String> valueFieldMapping,
+                                            boolean includePrivate) {
         return clazz.getMethods().stream()
-                .filter(m -> !m.isPrivate())
+                .filter(m -> includePrivate || !m.isPrivate())
                 .map(method -> {
                     List<MethodCall> calls = extractMethodCalls(
                             method, properties, valueFieldMapping, SERVICE_CALL_DEPTH);
@@ -379,7 +386,7 @@ public class SpoonCodeAnalyzer {
             String methodName = execRef.getSimpleName();
             String key = className + "." + methodName;
 
-            if (seen.contains(key) || isJavaStandardLibrary(className) || isGetterOrSetter(methodName)) return;
+            if (seen.contains(key) || isJavaStandardLibrary(className)) return;
             seen.add(key);
 
             // Extract nested information if we have depth remaining
@@ -602,7 +609,7 @@ public class SpoonCodeAnalyzer {
         for (CtExpression<?> arg : arguments) {
             String extracted = extractStringFromExpression(arg, properties, valueFieldMapping, declaringClass);
             if (extracted != null && !extracted.isBlank()) {
-                return normalizeUrl(extracted);
+                return normalizeUrl(stripDynamicTokens(extracted));
             }
         }
         return "<dynamic>";
@@ -746,18 +753,29 @@ public class SpoonCodeAnalyzer {
     }
 
     private String joinUrlParts(String left, String right) {
-        String safeLeft = left == null ? "<dynamic>" : left;
-        String safeRight = right == null ? "<dynamic>" : right;
+        String safeLeft = stripDynamicTokens(left);
+        String safeRight = stripDynamicTokens(right);
 
-        if ("<dynamic>".equals(safeLeft) && safeRight.startsWith("/")) return safeRight;
-        if ("<dynamic>".equals(safeRight) && safeLeft.contains("/")) return safeLeft + "<dynamic>";
+        if (safeLeft == null || safeLeft.isEmpty()) return safeRight == null ? "" : safeRight;
+        if (safeRight == null || safeRight.isEmpty()) return safeLeft;
         return safeLeft + safeRight;
     }
 
     private String normalizeUrl(String url) {
-        if (url == null || "<dynamic>".equals(url)) return "<dynamic>";
-        if (url.startsWith("<dynamic>/")) return url.substring("<dynamic>".length());
-        return url;
+        if (url == null) return "";
+        String normalized = stripDynamicTokens(url);
+        if (normalized == null || normalized.isEmpty()) return "";
+
+        // Collapse multiple slashes after removing dynamic tokens
+        normalized = normalized.replaceAll("/{2,}", "/");
+
+        if (normalized.startsWith("<dynamic>/")) return normalized.substring("<dynamic>".length());
+        return normalized;
+    }
+
+    private String stripDynamicTokens(String value) {
+        if (value == null) return null;
+        return value.replace("<dynamic>", "{dynamic}");
     }
 
     // ========================= VALUE FIELD MAPPING =========================
@@ -1168,6 +1186,40 @@ public class SpoonCodeAnalyzer {
                 || className.startsWith("jakarta.")
                 || className.startsWith("org.springframework.")
                 || className.startsWith("lombok.");
+    }
+
+    private boolean isGetterOrSetter(CtExecutableReference<?> execRef) {
+        if (execRef == null) return false;
+
+        String methodName = execRef.getSimpleName();
+        CtTypeReference<?> returnType = execRef.getType();
+        int paramCount = execRef.getParameters() == null ? 0 : execRef.getParameters().size();
+
+        boolean returnsVoid = returnType != null && "void".equals(returnType.getSimpleName());
+        boolean returnsDeclaringType = execRef.getDeclaringType() != null && returnType != null
+                && execRef.getDeclaringType().getSimpleName().equals(returnType.getSimpleName());
+
+        boolean isStdGetter = methodName.startsWith("get") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))
+                && paramCount == 0 && !returnsVoid;
+
+        boolean isBooleanGetter = methodName.startsWith("is") && methodName.length() > 2
+                && Character.isUpperCase(methodName.charAt(2))
+                && paramCount == 0
+                && returnType != null
+                && ("boolean".equalsIgnoreCase(returnType.getSimpleName())
+                    || Boolean.class.getSimpleName().equals(returnType.getSimpleName()));
+
+        boolean isStdSetter = methodName.startsWith("set") && methodName.length() > 3
+                && Character.isUpperCase(methodName.charAt(3))
+                && paramCount == 1
+                && (returnsVoid || returnsDeclaringType);
+
+        if (isStdGetter || isBooleanGetter || isStdSetter) {
+            return true;
+        }
+
+        return isGetterOrSetter(methodName);
     }
 
     private boolean isGetterOrSetter(String methodName) {
