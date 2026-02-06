@@ -28,6 +28,8 @@ public class GraphVisualizationService {
     private final RepositoryClassNodeRepository repositoryClassNodeRepository;
     private final KafkaTopicNodeRepository kafkaTopicNodeRepository;
     private final KafkaListenerNodeRepository kafkaListenerNodeRepository;
+    private final ExternalCallNodeRepository externalCallNodeRepository;
+    private final DatabaseTableNodeRepository databaseTableNodeRepository;
     private final Neo4jClient neo4jClient;
 
     // Node type colors for visualization
@@ -971,6 +973,7 @@ public class GraphVisualizationService {
 
     /**
      * Build complete graph for a Method node with full depth traversal.
+     * Uses explicit queries to load relationships since SDN doesn't auto-load them.
      */
     private void buildMethodNodeGraphFull(MethodNode method, String projectId,
                                           List<GraphNode> nodes, List<GraphEdge> edges,
@@ -1002,40 +1005,8 @@ public class GraphVisualizationService {
             }
         }
 
-        // Add external calls (MAKES_EXTERNAL_CALL)
-        if (method.getExternalCalls() != null) {
-            for (ExternalCallNode extCall : method.getExternalCalls()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
-            }
-        }
-
-        // Add Kafka topics this method produces to (PRODUCES_TO)
-        if (method.getProducesToTopics() != null) {
-            for (KafkaTopicNode topic : method.getProducesToTopics()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), topic.getId(), "PRODUCES_TO"));
-            }
-        }
-
-        // Check if this method belongs to a Repository and add database tables (ACCESSES)
-        if (method.getClassName() != null) {
-            String methodType = method.getMethodType();
-            if ("REPOSITORY_METHOD".equals(methodType) || method.getClassName().endsWith("Repository")) {
-                Optional<RepositoryClassNode> repoOpt = repositoryClassNodeRepository
-                        .findByProjectIdAndClassNameWithTables(projectId, method.getClassName());
-                repoOpt.ifPresent(repo -> {
-                    addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
-                    addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), method.getId(), "HAS_METHOD"));
-                    if (repo.getAccessesTables() != null) {
-                        for (DatabaseTableNode table : repo.getAccessesTables()) {
-                            addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
-                            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
-                        }
-                    }
-                });
-            }
-        }
+        // Load and add relationships using explicit queries (SDN doesn't auto-load them)
+        loadAndAddMethodRelationships(method, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
     }
 
     /**
@@ -1144,6 +1115,7 @@ public class GraphVisualizationService {
 
     /**
      * Process an endpoint and all its downstream dependencies recursively.
+     * Uses explicit queries to load relationships since SDN doesn't auto-load them.
      */
     private void processEndpointFull(EndpointNode endpoint, String parentId, String projectId,
                                      List<GraphNode> nodes, List<GraphEdge> edges,
@@ -1158,20 +1130,18 @@ public class GraphVisualizationService {
             }
         }
 
-        // Add external calls
-        if (endpoint.getExternalCalls() != null) {
-            for (ExternalCallNode extCall : endpoint.getExternalCalls()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
-            }
+        // Load and add external calls using explicit query
+        List<ExternalCallNode> externalCalls = externalCallNodeRepository.findByEndpointId(projectId, endpoint.getId());
+        for (ExternalCallNode extCall : externalCalls) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
         }
 
-        // Add Kafka topics
-        if (endpoint.getProducesToTopics() != null) {
-            for (KafkaTopicNode topic : endpoint.getProducesToTopics()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), topic.getId(), "PRODUCES_TO"));
-            }
+        // Load and add Kafka topics using explicit query
+        List<KafkaTopicNode> kafkaTopics = kafkaTopicNodeRepository.findByProducerEndpointId(projectId, endpoint.getId());
+        for (KafkaTopicNode topic : kafkaTopics) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), topic.getId(), "PRODUCES_TO"));
         }
     }
 
@@ -1179,6 +1149,7 @@ public class GraphVisualizationService {
      * Process a method and all its downstream dependencies recursively.
      * Uses addedNodeIds to prevent infinite loops from circular dependencies.
      * Also handles repository methods and their database table access.
+     * Uses explicit queries to load relationships since SDN doesn't auto-load them.
      */
     private void processMethodFull(MethodNode method, String parentId, String edgeType, String projectId,
                                    List<GraphNode> nodes, List<GraphEdge> edges,
@@ -1196,41 +1167,50 @@ public class GraphVisualizationService {
             }
         }
 
-        // Add external calls from this method
-        if (isNewNode && method.getExternalCalls() != null) {
-            for (ExternalCallNode extCall : method.getExternalCalls()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
-            }
+        // Load and add relationships using explicit queries (SDN doesn't auto-load them)
+        if (isNewNode) {
+            loadAndAddMethodRelationships(method, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
+        }
+    }
+
+    /**
+     * Load and add method relationships (external calls, Kafka topics, database tables) using explicit queries.
+     * This is necessary because Spring Data Neo4j doesn't automatically load @Relationship fields.
+     */
+    private void loadAndAddMethodRelationships(MethodNode method, String projectId,
+                                                List<GraphNode> nodes, List<GraphEdge> edges,
+                                                Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        // Load external calls for this method using explicit query
+        List<ExternalCallNode> externalCalls = externalCallNodeRepository.findByMethodId(projectId, method.getId());
+        for (ExternalCallNode extCall : externalCalls) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
         }
 
-        // Add Kafka topics produced by this method
-        if (isNewNode && method.getProducesToTopics() != null) {
-            for (KafkaTopicNode topic : method.getProducesToTopics()) {
-                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
-                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), topic.getId(), "PRODUCES_TO"));
-            }
+        // Load Kafka topics for this method using explicit query
+        List<KafkaTopicNode> kafkaTopics = kafkaTopicNodeRepository.findByProducerMethodId(projectId, method.getId());
+        for (KafkaTopicNode topic : kafkaTopics) {
+            addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), topic.getId(), "PRODUCES_TO"));
         }
 
         // Check if this method belongs to a Repository and add database tables
-        if (isNewNode && method.getClassName() != null) {
-            // Check if method type indicates it's a repository method
+        if (method.getClassName() != null) {
             String methodType = method.getMethodType();
             if ("REPOSITORY_METHOD".equals(methodType) || method.getClassName().endsWith("Repository")) {
-                // Use the query that loads database tables along with the repository
+                // Find the repository node
                 Optional<RepositoryClassNode> repoOpt = repositoryClassNodeRepository
-                        .findByProjectIdAndClassNameWithTables(projectId, method.getClassName());
+                        .findByProjectIdAndClassName(projectId, method.getClassName());
                 repoOpt.ifPresent(repo -> {
-                    // Add repository node if not already added
                     addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
                     addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), method.getId(), "HAS_METHOD"));
 
-                    // Add database tables accessed by this repository
-                    if (repo.getAccessesTables() != null) {
-                        for (DatabaseTableNode table : repo.getAccessesTables()) {
-                            addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
-                            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
-                        }
+                    // Load database tables using explicit query
+                    List<DatabaseTableNode> tables = databaseTableNodeRepository
+                            .findByRepositoryClassName(projectId, method.getClassName());
+                    for (DatabaseTableNode table : tables) {
+                        addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
                     }
                 });
             }

@@ -63,4 +63,14 @@ public interface KafkaTopicNodeRepository extends Neo4jRepository<KafkaTopicNode
            "  groupId: m.groupId" +
            "} AS result")
     List<Map<String, Object>> findConsumerDetailsForProject(String projectId);
+
+    // Find Kafka topics produced by a specific method
+    @Query("MATCH (m:Method {projectId: $projectId})-[:PRODUCES_TO]->(kt:KafkaTopic) " +
+           "WHERE m.id = $methodId RETURN kt")
+    List<KafkaTopicNode> findByProducerMethodId(String projectId, String methodId);
+
+    // Find Kafka topics produced by a specific endpoint
+    @Query("MATCH (e:Endpoint {projectId: $projectId})-[:PRODUCES_TO]->(kt:KafkaTopic) " +
+           "WHERE e.id = $endpointId RETURN kt")
+    List<KafkaTopicNode> findByProducerEndpointId(String projectId, String endpointId);
 }
