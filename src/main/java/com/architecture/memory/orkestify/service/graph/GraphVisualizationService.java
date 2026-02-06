@@ -1001,6 +1001,41 @@ public class GraphVisualizationService {
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(caller.getId(), method.getId(), "CALLS"));
             }
         }
+
+        // Add external calls (MAKES_EXTERNAL_CALL)
+        if (method.getExternalCalls() != null) {
+            for (ExternalCallNode extCall : method.getExternalCalls()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+            }
+        }
+
+        // Add Kafka topics this method produces to (PRODUCES_TO)
+        if (method.getProducesToTopics() != null) {
+            for (KafkaTopicNode topic : method.getProducesToTopics()) {
+                addNodeIfNotExists(nodes, addedNodeIds, convertKafkaTopicToGraphNode(topic));
+                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), topic.getId(), "PRODUCES_TO"));
+            }
+        }
+
+        // Check if this method belongs to a Repository and add database tables (ACCESSES)
+        if (method.getClassName() != null) {
+            String methodType = method.getMethodType();
+            if ("REPOSITORY_METHOD".equals(methodType) || method.getClassName().endsWith("Repository")) {
+                Optional<RepositoryClassNode> repoOpt = repositoryClassNodeRepository
+                        .findByProjectIdAndClassNameWithTables(projectId, method.getClassName());
+                repoOpt.ifPresent(repo -> {
+                    addNodeIfNotExists(nodes, addedNodeIds, convertRepositoryToGraphNode(repo));
+                    addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), method.getId(), "HAS_METHOD"));
+                    if (repo.getAccessesTables() != null) {
+                        for (DatabaseTableNode table : repo.getAccessesTables()) {
+                            addNodeIfNotExists(nodes, addedNodeIds, convertDatabaseTableToGraphNode(table));
+                            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(repo.getId(), table.getId(), "ACCESSES"));
+                        }
+                    }
+                });
+            }
+        }
     }
 
     /**
