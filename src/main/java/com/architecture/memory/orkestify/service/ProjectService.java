@@ -11,6 +11,7 @@ import com.architecture.memory.orkestify.repository.ProjectRepository;
 import com.architecture.memory.orkestify.repository.UserRepository;
 import com.architecture.memory.orkestify.service.graph.GraphPersistenceService;
 import com.architecture.memory.orkestify.service.graph.GraphResolutionService;
+import com.architecture.memory.orkestify.service.graph.analyzer.Neo4jCodeAnalysisService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -34,6 +35,7 @@ public class ProjectService {
     private final KafkaProducerConsumerResolver kafkaProducerConsumerResolver;
     private final GraphPersistenceService graphPersistenceService;
     private final GraphResolutionService graphResolutionService;
+    private final Neo4jCodeAnalysisService neo4jCodeAnalysisService;
 
     public ProjectResponse createProject(CreateProjectRequest request, String username) {
         log.info("Creating new project with name: {} for user: {}", request.getName(), username);
@@ -242,15 +244,8 @@ public class ProjectService {
                             .build();
                     upsertAnalysisResult(result);
 
-                    // Persist to Neo4j graph database
-                    try {
-                        graphPersistenceService.persistAnalysis(projectId, user.getId(), repositoryUrl, analysis);
-                        log.info("Persisted analysis to Neo4j graph for app: {}",
-                                buildAppKey(repositoryUrl, analysis.getApplicationInfo()));
-                    } catch (Exception graphEx) {
-                        log.error("Failed to persist analysis to Neo4j graph: {}", graphEx.getMessage(), graphEx);
-                        // Continue processing - MongoDB save was successful
-                    }
+                    // Neo4j graph persistence is now handled by the new pipeline below
+                    // (after all MongoDB saves are complete for this repository)
 
                     successCount++;
 
@@ -300,6 +295,19 @@ public class ProjectService {
 
         log.info("Deep code analysis completed for project: {}. Total repos: {}, Apps analyzed: {}, Success: {}, Failed: {}",
                 projectId, totalRepositories, applicationsAnalyzed, successCount, failureCount);
+
+        // Persist to Neo4j graph using the new 2-pass analyzer pipeline
+        // This replaces the old graphPersistenceService.persistAnalysis() call
+        for (String repositoryUrl : project.getGithubUrls()) {
+            try {
+                log.info("Persisting Neo4j graph for repository: {} (new pipeline)", repositoryUrl);
+                neo4jCodeAnalysisService.analyzeAndPersistGraph(projectId, user.getId(), repositoryUrl);
+                log.info("Neo4j graph persisted successfully for: {}", repositoryUrl);
+            } catch (Exception graphEx) {
+                log.error("Failed to persist Neo4j graph (new pipeline) for {}: {}", repositoryUrl, graphEx.getMessage(), graphEx);
+                // Non-fatal: MongoDB data is already saved
+            }
+        }
 
         // Trigger async resolution of external calls
         log.info("Triggering async external call resolution for project: {}", projectId);
