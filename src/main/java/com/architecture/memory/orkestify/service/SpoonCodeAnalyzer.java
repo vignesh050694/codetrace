@@ -64,7 +64,7 @@ public class SpoonCodeAnalyzer {
      * Call trace depth from service methods.
      * depth=0 means: only direct calls (repository calls, external calls, kafka calls)
      */
-    private static final int SERVICE_CALL_DEPTH = 0;
+    private static final int SERVICE_CALL_DEPTH = 1;
 
     // ========================= PUBLIC API =========================
 
@@ -257,13 +257,16 @@ public class SpoonCodeAnalyzer {
                 .filter(CtType::isClass)
                 .filter(this::isService)
                 .filter(t -> matchesPackage(t, basePackage))
-                .map(ctClass -> ServiceInfo.builder()
-                        .className(ctClass.getSimpleName())
-                        .packageName(ctClass.getPackage().getQualifiedName())
-                        .line(createLineRange(ctClass))
-                        .methods(extractMethods(ctClass, properties, valueFieldMapping, true))
-                        .implementedInterfaces(extractImplementedInterfaces(ctClass))
-                        .build())
+                .map(ctClass -> {
+                    log.info("Processing Service: {}", ctClass.getSimpleName());
+                    return ServiceInfo.builder()
+                            .className(ctClass.getSimpleName())
+                            .packageName(ctClass.getPackage().getQualifiedName())
+                            .line(createLineRange(ctClass))
+                            .methods(extractMethods(ctClass, properties, valueFieldMapping, true))
+                            .implementedInterfaces(extractImplementedInterfaces(ctClass))
+                            .build();
+                })
                 .collect(Collectors.toList());
     }
 
@@ -308,6 +311,11 @@ public class SpoonCodeAnalyzer {
         return clazz.getMethods().stream()
                 .filter(m -> includePrivate || !m.isPrivate())
                 .map(method -> {
+
+                    if(clazz.getSimpleName().equalsIgnoreCase("ProjectService") && method.getSimpleName().equalsIgnoreCase("changeStatus")){
+                        System.out.println("Project Service");
+                    }
+
                     List<MethodCall> calls = extractMethodCalls(
                             method, properties, valueFieldMapping, SERVICE_CALL_DEPTH);
                     List<ExternalCallInfo> externalCalls = mergeExternalCalls(
@@ -414,6 +422,7 @@ public class SpoonCodeAnalyzer {
             String className = execRef.getDeclaringType().getQualifiedName();
             String methodName = execRef.getSimpleName();
             String key = className + "." + methodName;
+
 
             if (seen.contains(key) || isJavaStandardLibrary(className)) return;
             seen.add(key);

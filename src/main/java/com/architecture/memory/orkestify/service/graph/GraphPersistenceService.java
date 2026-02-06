@@ -214,7 +214,6 @@ public class GraphPersistenceService {
                                                  Map<String, String> interfaceToImplMapping) {
         Set<ServiceNode> nodes = new HashSet<>();
         if (services == null) return nodes;
-        log.info("++++++++++++++++++++++++++++++++++++");
         for (ServiceInfo service : services) {
             ServiceNode serviceNode = ServiceNode.builder()
                     .className(service.getClassName())
@@ -275,10 +274,6 @@ public class GraphPersistenceService {
             // Link service methods to repository or other service methods using captured MethodInfo calls
             if (service.getMethods() != null) {
                 for (MethodInfo methodInfo : service.getMethods()) {
-                    if (methodInfo.getMethodName().equals("validateExceeding100")){
-                        System.out.println("In");
-                    }
-                    System.out.println("Started" +methodInfo.getMethodName());
                     MethodNode methodNode = resolveServiceMethodFromInfo(methodInfo, serviceMethodIndex, fullClassName, service.getClassName());
                     if (methodNode == null) continue;
 
@@ -296,7 +291,6 @@ public class GraphPersistenceService {
                             methodNode.getCalls().add(serviceTarget);
                         }
                     }
-                    System.out.println("ended" +methodInfo.getMethodName());
                 }
             }
 
