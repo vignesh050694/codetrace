@@ -38,3 +38,22 @@ github:
 
 cors:
   allowed-origins: "http://localhost:3000,https://product2.app"
+
+# OpenAI Configuration for Graph RAG
+openai:
+  api-key: ${OPENAI_API_KEY}
+  model:
+    embedding: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+    chat: ${OPENAI_CHAT_MODEL:gpt-4-turbo}
+  timeout: 60
+  max-retries: 3
+
+# Qdrant Vector Database Configuration
+qdrant:
+  host: ${QDRANT_HOST:103.191.208.233}
+  rest-port: ${QDRANT_REST_PORT:6333}  # HTTP REST API port (working)
+  grpc-port: ${QDRANT_GRPC_PORT:6334}  # gRPC port (for future when available)
+  api-key: ${QDRANT_API_KEY:}
+  collection: ${QDRANT_COLLECTION_NAME:code-embeddings}
+  use-tls: ${QDRANT_USE_TLS:false}
+

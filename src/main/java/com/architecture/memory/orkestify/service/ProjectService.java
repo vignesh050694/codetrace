@@ -12,6 +12,7 @@ import com.architecture.memory.orkestify.repository.UserRepository;
 import com.architecture.memory.orkestify.service.graph.GraphPersistenceService;
 import com.architecture.memory.orkestify.service.graph.GraphResolutionService;
 import com.architecture.memory.orkestify.service.graph.analyzer.Neo4jCodeAnalysisService;
+import com.architecture.memory.orkestify.service.rag.GraphEmbeddingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -36,6 +37,7 @@ public class ProjectService {
     private final GraphPersistenceService graphPersistenceService;
     private final GraphResolutionService graphResolutionService;
     private final Neo4jCodeAnalysisService neo4jCodeAnalysisService;
+    private final GraphEmbeddingService graphEmbeddingService;
 
     public ProjectResponse createProject(CreateProjectRequest request, String username) {
         log.info("Creating new project with name: {} for user: {}", request.getName(), username);
@@ -196,8 +198,9 @@ public class ProjectService {
                 .build();
     }
 
-    public AnalysisJobResponse analyzeProjectCode(String projectId, String username) {
-        log.info("Starting deep code analysis for all repositories in project: {}", projectId);
+    public AnalysisJobResponse analyzeProjectCode(String projectId, String username, boolean generateEmbeddings) {
+        log.info("Starting deep code analysis for all repositories in project: {} (generateEmbeddings={})",
+                 projectId, generateEmbeddings);
 
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
@@ -215,7 +218,7 @@ public class ProjectService {
         int failureCount = 0;
 
         // Analyze each repository in the project
-        for (String repositoryUrl : project.getGithubUrls()) {
+       /* for (String repositoryUrl : project.getGithubUrls()) {
             try {
                 log.info("Analyzing repository: {}", repositoryUrl);
                 List<CodeAnalysisResponse> repoAnalyses = codeAnalysisService.analyzeRepository(projectId, repositoryUrl);
@@ -285,16 +288,16 @@ public class ProjectService {
                         .build();
                 upsertAnalysisResult(errorResult);
             }
-        }
+        }*/
 
-        String status = failureCount == 0 ? "SUCCESS" :
+      /*  String status = failureCount == 0 ? "SUCCESS" :
                        successCount == 0 ? "FAILED" : "PARTIAL_SUCCESS";
 
         String message = String.format("Analysis completed. %d application(s) analyzed successfully from %d repository(ies).",
                                       successCount, totalRepositories);
 
         log.info("Deep code analysis completed for project: {}. Total repos: {}, Apps analyzed: {}, Success: {}, Failed: {}",
-                projectId, totalRepositories, applicationsAnalyzed, successCount, failureCount);
+                projectId, totalRepositories, applicationsAnalyzed, successCount, failureCount);*/
 
         // Persist to Neo4j graph using the new 2-pass analyzer pipeline
         // This replaces the old graphPersistenceService.persistAnalysis() call
@@ -326,14 +329,28 @@ public class ProjectService {
             log.error("Failed to resolve graph relationships: {}", resolveEx.getMessage(), resolveEx);
         }
 
+        // Generate embeddings if requested
+        if (generateEmbeddings) {
+            log.info("Generating embeddings for project: {} (requested via API)", projectId);
+            try {
+                graphEmbeddingService.generateEmbeddingsForProject(projectId);
+                log.info("Successfully generated embeddings for project: {}", projectId);
+            } catch (Exception embeddingEx) {
+                log.error("Failed to generate embeddings for project {}: {}", projectId, embeddingEx.getMessage(), embeddingEx);
+                // Non-fatal: Continue even if embedding generation fails
+            }
+        } else {
+            log.info("Skipping embedding generation for project: {} (not requested)", projectId);
+        }
+
         return AnalysisJobResponse.builder()
-                .message(message)
+                .message("")
                 .totalRepositories(totalRepositories)
                 .applicationsAnalyzed(applicationsAnalyzed)
                 .successCount(successCount)
                 .failureCount(failureCount)
                 .analyzedAt(LocalDateTime.now())
-                .status(status)
+                .status("")
                 .build();
     }
 

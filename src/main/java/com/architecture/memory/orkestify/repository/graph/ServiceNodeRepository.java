@@ -15,6 +15,8 @@ public interface ServiceNodeRepository extends Neo4jRepository<ServiceNode, Stri
 
     List<ServiceNode> findByProjectIdAndAppKey(String projectId, String appKey);
 
+    @Query("MATCH (s:Service {projectId: $projectId, className: $className}) " +
+           "RETURN s LIMIT 1")
     Optional<ServiceNode> findByProjectIdAndClassName(String projectId, String className);
 
     @Query("MATCH (s:Service {className: $className, packageName: $packageName, projectId: $projectId}) " +
@@ -22,7 +24,7 @@ public interface ServiceNodeRepository extends Neo4jRepository<ServiceNode, Stri
     Optional<ServiceNode> findByFullyQualifiedName(String projectId, String packageName, String className);
 
     @Query("MATCH (s:Service {projectId: $projectId})-[:HAS_METHOD]->(m:Method) " +
-           "RETURN s, collect(m) as methods")
+           "RETURN DISTINCT s")
     List<ServiceNode> findByProjectIdWithMethods(String projectId);
 
     @Query("MATCH (s:Service {projectId: $projectId})-[:HAS_METHOD]->(m:Method)-[:CALLS*1..3]->(target:Method) " +
@@ -30,15 +32,11 @@ public interface ServiceNodeRepository extends Neo4jRepository<ServiceNode, Stri
     List<Object[]> findServiceDependencies(String projectId);
 
     @Query("MATCH (s:Service {id: $serviceId}) " +
-           "OPTIONAL MATCH p1 = (s)-[:HAS_METHOD]->(m:Method) " +
-           "OPTIONAL MATCH p2 = (m)-[:CALLS]->(calledMethod:Method) " +
-           "OPTIONAL MATCH p3 = (m)-[:PRODUCES_TO]->(t:KafkaTopic) " +
-           "OPTIONAL MATCH p4 = (m)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
-           "RETURN s, " +
-           "collect(DISTINCT nodes(p1)), collect(DISTINCT relationships(p1)), " +
-           "collect(DISTINCT nodes(p2)), collect(DISTINCT relationships(p2)), " +
-           "collect(DISTINCT nodes(p3)), collect(DISTINCT relationships(p3)), " +
-           "collect(DISTINCT nodes(p4)), collect(DISTINCT relationships(p4))")
+           "OPTIONAL MATCH (s)-[:HAS_METHOD]->(m:Method) " +
+           "OPTIONAL MATCH (m)-[:CALLS]->(calledMethod:Method) " +
+           "OPTIONAL MATCH (m)-[:PRODUCES_TO]->(t:KafkaTopic) " +
+           "OPTIONAL MATCH (m)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
+           "RETURN s LIMIT 1")
     Optional<ServiceNode> findByIdWithFullDetails(String serviceId);
 
     @Query("MATCH (caller)-[:CALLS|HAS_METHOD*1..2]->(m:Method)<-[:HAS_METHOD]-(s:Service {id: $serviceId}) " +

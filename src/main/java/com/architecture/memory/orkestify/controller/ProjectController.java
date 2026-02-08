@@ -89,9 +89,11 @@ public class ProjectController {
     }
 
     @PostMapping("/{id}/analyze-code")
-    public ResponseEntity<AnalysisJobResponse> analyzeProjectCode(@PathVariable String id) {
+    public ResponseEntity<AnalysisJobResponse> analyzeProjectCode(
+            @PathVariable String id,
+            @RequestParam(required = false, defaultValue = "false") boolean generateEmbeddings) {
         String username = getAuthenticatedUsername();
-        AnalysisJobResponse response = projectService.analyzeProjectCode(id, username);
+        AnalysisJobResponse response = projectService.analyzeProjectCode(id, username, generateEmbeddings);
         return ResponseEntity.ok(response);
     }
 

@@ -1,0 +1,184 @@
+================================================================================
+COMPILATION ISSUES FIXED
+================================================================================
+1. Neo4j Value::asValue Method Reference Error
+   - Fixed in: GraphEmbeddingService.java
+   - Fixed in: GraphRAGQueryService.java
+   - Change: Value::asValue → v -> v
+   - Reason: asValue() method doesn't exist in Neo4j Value interface
+   - Files affected: 20 occurrences across 2 files
+2. Neo4j parent.labels() Error
+   - Fixed in: GraphRAGQueryService.java (line 291)
+   - Change: parent.labels() → parent.asNode().labels()
+   - Reason: parent is Value type, needs conversion to Node
+3. Lombok Builder Missing Fields
+   - Fixed in: GraphRagAnswer.java
+   - Added: @Builder.Default to answer field
+   - Fixed in: GraphRagController.java
+   - Added: .processingTimeMs(0) to error builder call
+========================================================================================================================================
+C==COMPILATION ISSUES FIXED
+======================================================at=======================io1. Neo4j Value::asValue Method Reference Error
+   - Fixed in: GraphEmbeddingSeres   - Fixed in: GraphEmbeddingService.java
+   de   - Fixed in: GraphRAGQueryService.javal`   - Change: Value::asValue → v ->thod    - Reason: asValue() m   - STATUS: No   - Files affected: 20 occurrences across 2 files
+2. Neo4j parent.sc2. Neo4j parent.labels() Error
+   - Fixed in: Grat
+   - Fixed in: GraphRAGQuerySd"   - Change: parent.labels() → parent.asNode().l d   - Reason: parent is Value type, needs conversion to N==3. Lombok Builder Missing Fields
+   - Fixed in: GraphRagAnAT   - Fixed in: GraphRagAnswer.j==   - Added: @Builder.Default to a==   - Fixed in: GraphRagController.java
+   -xe   - Added: .processingTimeMs(0) to 
+?====================================================enC==COMPILATION ISSUES FIXED
+======================================================at=======================io1. Neo4j Value::asValue Meau============================   - Fixed in: GraphEmbeddingSeres   - Fixed in: GraphEmbeddingServiccd /Users/vignesh/Desktop/orkestify/dev/codetrace && grep -c "v -> v" src/main/java/com/architecture/memory/orkestify/service/rag/GraphEmbeddingService.java src/main/java/com/architecture/memory/orkestify/service/rag/GraphRAGQueryService.java
+cd /Users/vignesh/Desktop/orkestify/dev/codetrace && grep "v -> v" src/main/java/com/architecture/memory/orkestify/service/rag/*.java | wc -l
+cd /Users/vignesh/Desktop/orkestify/dev/codetrace && find src/main/java/com/architecture/memory/orkestify/service/rag -name "*.java" -exec grep -l "v -> v" {} \;
+curl -v http://103.191.208.233:6333/collections 2>&1 | head -20
+timeout 5 bash -c "curl http://103.191.208.233:6333/collections" || echo "Connection failed or timeout"
+cat > /Users/vignesh/Desktop/orkestify/dev/codetrace/QDRANT_SETUP_FIX.md << 'EOF'
+# Qdrant gRPC Port Fix
+## Problem
+Your Qdrant server is accessible on HTTP port 6333, but LangChain4j requires **gRPC port 6334**.
+## Your Current Setup
+```
+QDRANT_URL=http://103.191.208.233:6333  ← HTTP REST API (works for other projects)
+```
+## What LangChain4j Needs
+```
+QDRANT_HOST=103.191.208.233
+QDRANT_GRPC_PORT=6334                    ← gRPC API (required!)
+```
+---
+## Solution 1: Expose gRPC Port 6334 on Your VPS
+### If Using Docker:
+```bash
+# SSH to your VPS
+ssh user@103.191.208.233
+# Stop current Qdrant container
+docker stop qdrant
+# Restart with BOTH ports exposed
+docker run -d \
+  --name qdrant \
+  -p 6333:6333 \
+  -p 6334:6334 \
+  -v $(pwd)/qdrant_storage:/qdrant/storage:z \
+  qdrant/qdrant
+```
+### Verify Ports are Open:
+```bash
+# On your VPS, check both ports
+netstat -tuln | grep 633
+# Should show:
+# tcp  0  0.0.0.0:6333  LISTEN  (HTTP)
+# tcp  0  0.0.0.0:6334  LISTEN  (gRPC)
+```
+### Update Firewall (if needed):
+`# Qdrant gRPC Port Fix
+## Problem
+Your Qdrant server is accessible on HTTP port d
+## Problem
+Your Qdran: Your Qdraba## Your Current Setup
+```
+QDRANT_URL=http://103.191.208.233:6333  ← HTTP REST API (works for  A```
+QDRANT_URL=http:meQDat```
+## What LangChain4j Needs
+```
+QDRANT_HOST=103.191.208.233
+QDRANT_GRPC_PORT=6334.
+##-
+```
+QDRANT_HOST=103.191.m QDurQDRANT_GRPC_PORT=6334     rt 6334:
+```bash
+# Test HTTP API (should work - already working)
+cur--http:/### If Using Docker:
+```bash
+# SSH to your VPS
+C ```bash
+# SSH to yod # SSH t ssh user@103.1n, r# Stop current Qdrant c 1docker stop qdrant
+# Restart wel# Restart with BO1.docker run -d \
+  --name qdrant en  --name qdranr   -p 6333:6333 \ t  -p 6334:6334 pl  -v $(pwd)/qdrh
+  qdrant/qdrant
+```
+### Verify Ports are OpenAN```
+### Verif334##xp```bash
+# On your VPS, cht # On y_Cnetstat -tuln | grep 633
+# Sho
+e# Should show:
+# tcp  0-y# tcp  0  0.0``# tcp  0  0.0.0.0:6334  LISTEN  (gRPC`.```
+### Update Firewall (if needed):
+10##19`# Qdrant gRPC Port Fix
+## Prob
+Q## Problem
+Your QdrantCOYour QdraNA## Problem
+Your Qdran: Your Qdraba## Your Curr--Your QdraCo```
+QDRANT_URL=http://103.191.208.233:6333 caQDosQDRANT_URL=http:meQDat```
+## What LangChain4j Needs
+```
+QDRANT_HOST=103.1
+`## What LangChain4j Needtr```
+QDRANT_HOST=103.191.",QD "QDRANT_GRPC_PORT=6334.
+##-on##-
+```
+QDRANT_HOST=1"
+`````
+--```bash
+# Testsues
+### Issue: "Connection refused" on port 63# Testixcur--http:/### If Using Docker:
+```bash
+# SSH 1 ```bash
+# SSH to yoFirst receive# SSH e C ```bash
+# SSH "
+# SSH to Y# Restart wel# Restart with BO1.docker run -d \
+  --name qdrant en  --name qdranreo  --name qdrant en  --name qdranr   -p 6333:63un  qdrant/qdrant
+```
+### Verify Ports are OpenAN```
+### Verif334##xp```bash
+# On yourt ```
+### Verifylo##lh### Verif334##xp```bash
+# On `-# On your VPS, cht # O--# Sho
+e# Should show:
+# tcp  0-y# tcp  0  0.0``#docke# Sun# tcp  0-y# tcan### Update Firewall (if needed):
+10##19`# Qdrant gRPC Port Fix
+## or10##19`# Qdrant gRPC Port Fix
+#pe## Prob
+Q## Problem
+```
+Then vQ## Pr
+`Your QdrankeYour Qdran: Your Qdraba## You"
+# ShQDRANT_URL=http://103.191.208.233:6333 caQDosQDRAN
+-## What LangChain4j Needs
+```
+QDRANT_HOST=103.1
+`## What LangChain4j gR```
+QDRANT_HOST=103.1
+`#seQD(n`## What LangChaaiQDRANT_HOST=103.191.",QD "QDR 6##-on##-
+```
+QDRANT_HOST=1"
+`````
+--```bash
+# Trs```
+QDR QQDAN`````
+--```ba33--``F
+# Testsurs### IssueDe```bash
+# SSH 1 ```bash
+# SSH to yoFirst receive# cat > /Users/vignesh/Desktop/orkestify/dev/codetrace/.env.example << 'EOF'
+# Database Configuration
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DATABASE=orkestify
+# Neo4j Configuration
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=password
+# GitHub OAuth
+GITHUB_CLIENT_ID=your-github-client-id
+GITHUB_CLIENT_SECRET=your-github-client-secret
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
+# Server Configuration
+SERVER_PORT=8080
+# OpenAI Configuration (Required for Graph RAG)
+OPENAI_API_KEY=sk-your-openai-api-key-here
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_CHAT_MODEL=gpt-4-turbo
+# Qdrant Configuration (for Graph RAG embeddings)
+QDRANT_HOST=103.191.208.233
+QDRANT_GRPC_PORT=6334
+QDRANT_API_KEY=
+QDRANT_COLLECTION_NAME=code-embeddings
+QDRANT_USE_TLS=false

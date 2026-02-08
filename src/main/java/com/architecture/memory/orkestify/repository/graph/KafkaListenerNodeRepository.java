@@ -15,6 +15,8 @@ public interface KafkaListenerNodeRepository extends Neo4jRepository<KafkaListen
 
     List<KafkaListenerNode> findByProjectIdAndAppKey(String projectId, String appKey);
 
+    @Query("MATCH (k:KafkaListener {projectId: $projectId, className: $className}) " +
+           "RETURN k LIMIT 1")
     Optional<KafkaListenerNode> findByProjectIdAndClassName(String projectId, String className);
 
     @Query("MATCH (k:KafkaListener {className: $className, packageName: $packageName, projectId: $projectId}) " +
@@ -22,7 +24,7 @@ public interface KafkaListenerNodeRepository extends Neo4jRepository<KafkaListen
     Optional<KafkaListenerNode> findByFullyQualifiedName(String projectId, String packageName, String className);
 
     @Query("MATCH (k:KafkaListener {projectId: $projectId})-[:HAS_LISTENER_METHOD]->(m:KafkaListenerMethod) " +
-           "RETURN k, collect(m) as listenerMethods")
+           "RETURN DISTINCT k")
     List<KafkaListenerNode> findByProjectIdWithListenerMethods(String projectId);
 
     default List<KafkaListenerNode> findByProjectIdWithMethods(String projectId) {
@@ -30,10 +32,10 @@ public interface KafkaListenerNodeRepository extends Neo4jRepository<KafkaListen
     }
 
     @Query("MATCH (k:KafkaListener {projectId: $projectId})-[:HAS_LISTENER_METHOD]->(m:KafkaListenerMethod)-[:CONSUMES_FROM]->(t:KafkaTopic) " +
-           "RETURN k, collect(DISTINCT t.name) as consumedTopics")
+           "RETURN DISTINCT k, t")
     List<Object[]> findKafkaListenersWithTopics(String projectId);
 
     @Query("MATCH (k:KafkaListener {projectId: $projectId})-[:HAS_LISTENER_METHOD]->(m:KafkaListenerMethod)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
-           "RETURN k, collect(DISTINCT m) as listenerMethods")
+           "RETURN DISTINCT k")
     List<KafkaListenerNode> findByProjectIdWithExternalCalls(String projectId);
 }

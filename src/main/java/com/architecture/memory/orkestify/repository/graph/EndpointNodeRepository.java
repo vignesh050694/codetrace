@@ -13,39 +13,41 @@ public interface EndpointNodeRepository extends Neo4jRepository<EndpointNode, St
 
     List<EndpointNode> findByProjectId(String projectId);
 
+    @Query("MATCH (e:Endpoint {projectId: $projectId, fullPath: $fullPath}) " +
+           "RETURN e LIMIT 1")
     Optional<EndpointNode> findByProjectIdAndFullPath(String projectId, String fullPath);
 
     List<EndpointNode> findByProjectIdAndHttpMethod(String projectId, String httpMethod);
 
     @Query("MATCH (e:Endpoint {projectId: $projectId}) " +
-           "WHERE e.fullPath =~ $pathPattern " +
-           "RETURN e")
+            "WHERE e.fullPath =~ $pathPattern " +
+            "RETURN e")
     List<EndpointNode> findByPathPattern(String projectId, String pathPattern);
 
     @Query("MATCH (e:Endpoint {projectId: $projectId})-[:CALLS*1..5]->(m:Method) " +
-           "RETURN e, collect(m) as calledMethods")
+            "RETURN e, collect(m) as calledMethods")
     List<EndpointNode> findByProjectIdWithCallChain(String projectId);
 
     @Query("MATCH (e:Endpoint {fullPath: $fullPath, httpMethod: $httpMethod, projectId: $projectId}) " +
-           "RETURN e")
+            "RETURN e")
     Optional<EndpointNode> findByFullPathAndMethod(String projectId, String fullPath, String httpMethod);
 
     @Query("MATCH (e:Endpoint {projectId: $projectId})-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
-           "RETURN e, collect(ec) as externalCalls")
+            "RETURN e, collect(ec) as externalCalls")
     List<EndpointNode> findByProjectIdWithExternalCalls(String projectId);
 
     @Query("MATCH (e:Endpoint {projectId: $projectId})-[:PRODUCES_TO]->(t:KafkaTopic) " +
-           "RETURN e, collect(t) as topics")
+            "RETURN e, collect(t) as topics")
     List<EndpointNode> findByProjectIdWithKafkaProducers(String projectId);
 
     @Query("MATCH (e:Endpoint {id: $endpointId}) " +
-           "OPTIONAL MATCH p1 = (e)-[:CALLS*1..5]->(m:Method) " +
-           "OPTIONAL MATCH p2 = (e)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
-           "OPTIONAL MATCH p3 = (e)-[:PRODUCES_TO]->(t:KafkaTopic) " +
-           "RETURN e, " +
-           "collect(DISTINCT nodes(p1)), collect(DISTINCT relationships(p1)), " +
-           "collect(DISTINCT nodes(p2)), collect(DISTINCT relationships(p2)), " +
-           "collect(DISTINCT nodes(p3)), collect(DISTINCT relationships(p3))")
+            "OPTIONAL MATCH p1 = (e)-[:CALLS*1..5]->(m:Method) " +
+            "OPTIONAL MATCH p2 = (e)-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
+            "OPTIONAL MATCH p3 = (e)-[:PRODUCES_TO]->(t:KafkaTopic) " +
+            "RETURN e, " +
+            "collect(DISTINCT nodes(p1)), collect(DISTINCT relationships(p1)), " +
+            "collect(DISTINCT nodes(p2)), collect(DISTINCT relationships(p2)), " +
+            "collect(DISTINCT nodes(p3)), collect(DISTINCT relationships(p3))")
     Optional<EndpointNode> findByIdWithFullCallChain(String endpointId);
 
     List<EndpointNode> findByControllerClass(String controllerClass);

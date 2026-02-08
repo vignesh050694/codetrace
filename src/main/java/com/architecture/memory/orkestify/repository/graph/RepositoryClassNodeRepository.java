@@ -16,11 +16,13 @@ public interface RepositoryClassNodeRepository extends Neo4jRepository<Repositor
 
     List<RepositoryClassNode> findByProjectIdAndAppKey(String projectId, String appKey);
 
+    @Query("MATCH (r:RepositoryClass {projectId: $projectId, className: $className}) " +
+           "RETURN r LIMIT 1")
     Optional<RepositoryClassNode> findByProjectIdAndClassName(String projectId, String className);
 
     @Query("MATCH (r:RepositoryClass {projectId: $projectId, className: $className}) " +
            "OPTIONAL MATCH (r)-[:ACCESSES]->(t:DatabaseTable) " +
-           "RETURN r, collect(t) as accessesTables")
+           "RETURN r LIMIT 1")
     Optional<RepositoryClassNode> findByProjectIdAndClassNameWithTables(String projectId, String className);
 
     List<RepositoryClassNode> findByProjectIdAndRepositoryType(String projectId, String repositoryType);
@@ -28,7 +30,6 @@ public interface RepositoryClassNodeRepository extends Neo4jRepository<Repositor
     @Query("MATCH (r:RepositoryClass {className: $className, packageName: $packageName, projectId: $projectId}) " +
            "RETURN r")
     Optional<RepositoryClassNode> findByFullyQualifiedName(String projectId, String packageName, String className);
-
 
     // Simple query to avoid SDN mapping issues - returns individual table records
     @Query("MATCH (t:DatabaseTable {projectId: $projectId}) " +
@@ -42,7 +43,7 @@ public interface RepositoryClassNodeRepository extends Neo4jRepository<Repositor
     List<Map<String, Object>> findRepoTableMappings(String projectId);
 
     @Query("MATCH (r:RepositoryClass {projectId: $projectId})-[:HAS_METHOD]->(m:Method) " +
-           "RETURN r, collect(m) as methods")
+           "RETURN DISTINCT r")
     List<RepositoryClassNode> findByProjectIdWithMethods(String projectId);
 
     @Query("MATCH (r:RepositoryClass {projectId: $projectId}) RETURN r")

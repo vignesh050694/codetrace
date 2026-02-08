@@ -21,10 +21,11 @@ import java.util.Map;
 public class ParsedApplication {
     private String mainClassName;
     private String mainClassPackage;
-    private boolean isSpringBoot;
+    @Builder.Default
+    private boolean isSpringBoot = false;
     private String rootPath;
-    private int lineStart;
-    private int lineEnd;
+    private Integer lineStart;
+    private Integer lineEnd;
 
     // All parsed components by type
     @Builder.Default

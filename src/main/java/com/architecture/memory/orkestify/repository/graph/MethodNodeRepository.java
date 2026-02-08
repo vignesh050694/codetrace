@@ -34,6 +34,6 @@ public interface MethodNodeRepository extends Neo4jRepository<MethodNode, String
     List<Object> findCallPathsToMethod(String projectId, String signature);
 
     @Query("MATCH (m:Method {projectId: $projectId})-[:MAKES_EXTERNAL_CALL]->(ec:ExternalCall) " +
-           "RETURN m, collect(ec) as externalCalls")
+           "RETURN DISTINCT m")
     List<MethodNode> findMethodsWithExternalCalls(String projectId);
 }

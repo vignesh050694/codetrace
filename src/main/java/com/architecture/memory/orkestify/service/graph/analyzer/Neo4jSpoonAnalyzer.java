@@ -62,6 +62,22 @@ public class Neo4jSpoonAnalyzer {
     private static final Set<String> KAFKA_PRODUCER_METHODS = Set.of("send", "sendDefault");
     private static final Set<String> KAFKA_PRODUCER_TYPES = Set.of("KafkaTemplate", "ReactiveKafkaProducerTemplate");
 
+    // HttpURLConnection methods that indicate HTTP calls
+    private static final Set<String> HTTP_URL_CONNECTION_METHODS = Set.of(
+            "openConnection", "setRequestMethod", "getInputStream", "getOutputStream", "connect"
+    );
+
+    // Repository methods that indicate database operations
+    private static final Set<String> REPOSITORY_WRITE_METHODS = Set.of(
+            "save", "saveAll", "saveAndFlush", "saveAllAndFlush",
+            "delete", "deleteAll", "deleteById", "deleteAllById", "deleteInBatch", "deleteAllInBatch",
+            "insert", "update", "upsert"
+    );
+    private static final Set<String> REPOSITORY_READ_METHODS = Set.of(
+            "findById", "findAll", "findAllById", "existsById", "count",
+            "getById", "getReferenceById", "getOne"
+    );
+
     // ========================= PUBLIC API =========================
 
     /**
@@ -136,7 +152,6 @@ public class Neo4jSpoonAnalyzer {
     private ParsedApplication analyzeAllTypes(CtModel model, Map<String, String> properties,
                                                Map<String, String> valueFieldMapping) {
         ParsedApplication app = ParsedApplication.builder()
-                .isSpringBoot(false)
                 .build();
 
         collectComponents(model, "", properties, valueFieldMapping, app);
@@ -329,13 +344,15 @@ public class Neo4jSpoonAnalyzer {
         }
 
         // 2. Explicit constructor injection
-        for (CtConstructor<?> constructor : ctType.getConstructors()) {
-            if (constructor.getParameters().isEmpty()) continue;
-            for (CtParameter<?> param : constructor.getParameters()) {
-                // Find the field that matches this constructor param
-                CtField<?> matchingField = findFieldByType(ctType, param.getType());
-                if (matchingField != null) {
-                    addInjectedDependency(component, matchingField, InjectedDependency.InjectionType.CONSTRUCTOR);
+        if (ctType instanceof CtClass<?> ctClass) {
+            for (CtConstructor<?> constructor : ctClass.getConstructors()) {
+                if (constructor.getParameters().isEmpty()) continue;
+                for (CtParameter<?> param : constructor.getParameters()) {
+                    // Find the field that matches this constructor param
+                    CtField<?> matchingField = findFieldByType(ctType, param.getType());
+                    if (matchingField != null) {
+                        addInjectedDependency(component, matchingField, InjectedDependency.InjectionType.CONSTRUCTOR);
+                    }
                 }
             }
         }
@@ -588,13 +605,32 @@ public class Neo4jSpoonAnalyzer {
         method.getElements(e -> e instanceof CtInvocation).forEach(element -> {
             CtInvocation<?> invocation = (CtInvocation<?>) element;
             CtExecutableReference<?> execRef = invocation.getExecutable();
-            if (execRef == null || execRef.getDeclaringType() == null) return;
+            if (execRef == null) return;
 
-            String declaredType = execRef.getDeclaringType().getQualifiedName();
+            // Handle cases where execRef.getDeclaringType() is null (e.g., JPA repository proxy calls)
+            String declaredType = null;
+            if (execRef.getDeclaringType() != null) {
+                declaredType = execRef.getDeclaringType().getQualifiedName();
+            } else {
+                // Try to get the type from the target field (for repository calls like repository.save())
+                CtExpression<?> target = invocation.getTarget();
+                if (target != null) {
+                    try {
+                        if (target.getType() != null && target.getType().getQualifiedName() != null) {
+                            declaredType = target.getType().getQualifiedName();
+                        }
+                    } catch (Exception e) {
+                        // Ignore and skip this invocation
+                    }
+                }
+                if (declaredType == null) return;
+            }
+
             String methodName = execRef.getSimpleName();
 
             // Skip standard library, getters/setters, builder patterns
-            if (isStandardType(declaredType) || isGetterOrSetter(methodName)) return;
+          /*  if (isStandardType(declaredType) || isGetterOrSetter(methodName)) return;*/
+            if (isStandardType(declaredType)) return;
 
             String key = declaredType + "#" + methodName;
             if (!seen.add(key)) return;
@@ -610,6 +646,11 @@ public class Neo4jSpoonAnalyzer {
                         properties, valueFieldMapping, declaringClass));
                 return;
             }
+            if (isHttpUrlConnectionCall(declaredType, methodName, invocation)) {
+                pm.getExternalCalls().add(buildHttpUrlConnectionCall(invocation, declaredType, methodName,
+                        method, properties, valueFieldMapping, declaringClass));
+                return;
+            }
             if (feignClients.contains(declaredType)) {
                 pm.getExternalCalls().add(buildFeignExternalCall(invocation, execRef, declaredType));
                 return;
@@ -620,6 +661,12 @@ public class Neo4jSpoonAnalyzer {
                 pm.getKafkaCalls().add(buildKafkaProducerCall(invocation, declaredType, methodName,
                         declaringClass, properties, valueFieldMapping));
                 return;
+            }
+
+            // Log repository calls for debugging
+            if (isRepositoryCall(declaredType, methodName)) {
+                log.debug("[neo4j-analyzer] Detected repository call: {}.{}() - operation: {}",
+                        declaredType, methodName, getRepositoryOperation(methodName));
             }
 
             // Regular method call - capture as raw invocation
@@ -640,9 +687,27 @@ public class Neo4jSpoonAnalyzer {
         method.getElements(e -> e instanceof CtInvocation).forEach(element -> {
             CtInvocation<?> invocation = (CtInvocation<?>) element;
             CtExecutableReference<?> execRef = invocation.getExecutable();
-            if (execRef == null || execRef.getDeclaringType() == null) return;
+            if (execRef == null) return;
 
-            String declaredType = execRef.getDeclaringType().getQualifiedName();
+            // Handle cases where execRef.getDeclaringType() is null (e.g., JPA repository proxy calls)
+            String declaredType = null;
+            if (execRef.getDeclaringType() != null) {
+                declaredType = execRef.getDeclaringType().getQualifiedName();
+            } else {
+                // Try to get the type from the target field (for repository calls like repository.save())
+                CtExpression<?> target = invocation.getTarget();
+                if (target != null) {
+                    try {
+                        if (target.getType() != null && target.getType().getQualifiedName() != null) {
+                            declaredType = target.getType().getQualifiedName();
+                        }
+                    } catch (Exception e) {
+                        // Ignore and skip this invocation
+                    }
+                }
+                if (declaredType == null) return;
+            }
+
             String methodName = execRef.getSimpleName();
 
             if (isStandardType(declaredType) || isGetterOrSetter(methodName)) return;
@@ -660,6 +725,11 @@ public class Neo4jSpoonAnalyzer {
                         properties, valueFieldMapping, declaringClass));
                 return;
             }
+            if (isHttpUrlConnectionCall(declaredType, methodName, invocation)) {
+                klm.getExternalCalls().add(buildHttpUrlConnectionCall(invocation, declaredType, methodName,
+                        method, properties, valueFieldMapping, declaringClass));
+                return;
+            }
             if (feignClients.contains(declaredType)) {
                 klm.getExternalCalls().add(buildFeignExternalCall(invocation, execRef, declaredType));
                 return;
@@ -668,6 +738,12 @@ public class Neo4jSpoonAnalyzer {
                 klm.getKafkaCalls().add(buildKafkaProducerCall(invocation, declaredType, methodName,
                         declaringClass, properties, valueFieldMapping));
                 return;
+            }
+
+            // Log repository calls for debugging
+            if (isRepositoryCall(declaredType, methodName)) {
+                log.debug("[neo4j-analyzer] Detected repository call in Kafka listener: {}.{}() - operation: {}",
+                        declaredType, methodName, getRepositoryOperation(methodName));
             }
 
             RawInvocation raw = buildRawInvocation(invocation, execRef, declaringClass);
@@ -680,8 +756,27 @@ public class Neo4jSpoonAnalyzer {
     private RawInvocation buildRawInvocation(CtInvocation<?> invocation, CtExecutableReference<?> execRef,
                                               CtType<?> declaringClass) {
         try {
-            String declaredTypeSimple = execRef.getDeclaringType().getSimpleName();
-            String declaredTypeQualified = execRef.getDeclaringType().getQualifiedName();
+            String declaredTypeSimple = null;
+            String declaredTypeQualified = null;
+
+            // Handle null declaring type (e.g., JPA repository proxies)
+            if (execRef.getDeclaringType() != null) {
+                declaredTypeSimple = execRef.getDeclaringType().getSimpleName();
+                declaredTypeQualified = execRef.getDeclaringType().getQualifiedName();
+            } else {
+                // Try to get type from the invocation target
+                CtExpression<?> target = invocation.getTarget();
+                if (target != null && target.getType() != null) {
+                    declaredTypeSimple = target.getType().getSimpleName();
+                    declaredTypeQualified = target.getType().getQualifiedName();
+                }
+            }
+
+            // If we still don't have type info, skip this invocation
+            if (declaredTypeSimple == null || declaredTypeQualified == null) {
+                return null;
+            }
+
             String methodName = execRef.getSimpleName();
             String signature = execRef.getSignature();
 
@@ -841,9 +936,56 @@ public class Neo4jSpoonAnalyzer {
         return false;
     }
 
+    private boolean isHttpUrlConnectionCall(String declaredType, String methodName, CtInvocation<?> invocation) {
+        // Check for URL.openConnection() or HttpURLConnection methods
+        if ("openConnection".equals(methodName) &&
+            (declaredType.equals("java.net.URL") || declaredType.endsWith(".URL"))) {
+            return true;
+        }
+
+        // Check for HttpURLConnection methods
+        if (HTTP_URL_CONNECTION_METHODS.contains(methodName)) {
+            if (declaredType.contains("HttpURLConnection") ||
+                declaredType.contains("URLConnection")) {
+                return true;
+            }
+
+            // Check target type
+            CtExpression<?> target = invocation.getTarget();
+            if (target != null && target.getType() != null) {
+                String typeName = target.getType().getQualifiedName();
+                return typeName.contains("HttpURLConnection") || typeName.contains("URLConnection");
+            }
+        }
+
+        return false;
+    }
+
     private boolean isKafkaProducerCall(String declaredType, String methodName) {
         return KAFKA_PRODUCER_METHODS.contains(methodName)
                 && KAFKA_PRODUCER_TYPES.stream().anyMatch(declaredType::endsWith);
+    }
+
+    private boolean isRepositoryCall(String declaredType, String methodName) {
+        // Check if it's a repository type and uses a repository method
+        boolean isRepoType = declaredType.endsWith("Repository") ||
+                           declaredType.contains("Repository<");
+        boolean isRepoMethod = REPOSITORY_WRITE_METHODS.contains(methodName) ||
+                             REPOSITORY_READ_METHODS.contains(methodName);
+        return isRepoType && isRepoMethod;
+    }
+
+    private String getRepositoryOperation(String methodName) {
+        if (REPOSITORY_WRITE_METHODS.contains(methodName)) {
+            if (methodName.startsWith("save")) return "SAVE";
+            if (methodName.startsWith("delete")) return "DELETE";
+            if (methodName.equals("insert")) return "INSERT";
+            if (methodName.equals("update")) return "UPDATE";
+            if (methodName.equals("upsert")) return "UPSERT";
+        } else if (REPOSITORY_READ_METHODS.contains(methodName)) {
+            return "READ";
+        }
+        return "UNKNOWN";
     }
 
     private ParsedExternalCall buildRestTemplateExternalCall(CtInvocation<?> invocation, String declaredType,
@@ -913,6 +1055,75 @@ public class Neo4jSpoonAnalyzer {
                 .url(url)
                 .targetClass(declaredType)
                 .targetMethod(execRef.getSimpleName())
+                .lineStart(safeGetLine(invocation))
+                .lineEnd(safeGetEndLine(invocation))
+                .build();
+    }
+
+    private ParsedExternalCall buildHttpUrlConnectionCall(CtInvocation<?> invocation, String declaredType,
+                                                           String methodName, CtMethod<?> containingMethod,
+                                                           Map<String, String> properties,
+                                                           Map<String, String> valueFieldMapping,
+                                                           CtType<?> declaringClass) {
+        String httpMethod = "GET"; // Default
+        String url = "<dynamic>";
+
+        try {
+            // Extract HTTP method from setRequestMethod calls in the same method
+            if (containingMethod != null) {
+                containingMethod.getElements(e -> e instanceof CtInvocation).forEach(element -> {
+                    try {
+                        CtInvocation<?> inv = (CtInvocation<?>) element;
+                        if ("setRequestMethod".equals(inv.getExecutable().getSimpleName())) {
+                            List<CtExpression<?>> args = inv.getArguments();
+                            if (!args.isEmpty()) {
+                                String method = extractStringFromExpression(args.get(0), properties, valueFieldMapping, declaringClass);
+                                if (method != null && !method.isEmpty()) {
+                                    log.debug("[neo4j-analyzer] Found HTTP method: {}", method);
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                });
+            }
+
+            // Extract URL from new URL(urlString).openConnection() pattern
+            if ("openConnection".equals(methodName) && invocation.getTarget() instanceof CtConstructorCall) {
+                CtConstructorCall<?> ctorCall = (CtConstructorCall<?>) invocation.getTarget();
+                List<CtExpression<?>> args = ctorCall.getArguments();
+                if (!args.isEmpty()) {
+                    url = extractStringFromExpression(args.get(0), properties, valueFieldMapping, declaringClass);
+                    if (url == null) url = "<dynamic>";
+                }
+            } else if (containingMethod != null) {
+                // Look for new URL(...) constructor calls in the method
+                for (Object element : containingMethod.getElements(e -> e instanceof CtConstructorCall)) {
+                    try {
+                        CtConstructorCall<?> ctor = (CtConstructorCall<?>) element;
+                        if (ctor.getType() != null && ctor.getType().getQualifiedName().equals("java.net.URL")) {
+                            List<CtExpression<?>> args = ctor.getArguments();
+                            if (!args.isEmpty()) {
+                                String extractedUrl = extractStringFromExpression(args.get(0), properties, valueFieldMapping, declaringClass);
+                                if (extractedUrl != null && !extractedUrl.isEmpty()) {
+                                    url = extractedUrl;
+                                    log.debug("[neo4j-analyzer] Found URL: {}", extractedUrl);
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[neo4j-analyzer] Could not extract HttpURLConnection details: {}", e.getMessage());
+        }
+
+        return ParsedExternalCall.builder()
+                .clientType("HttpURLConnection")
+                .httpMethod(httpMethod)
+                .url(url)
+                .targetClass(declaredType)
+                .targetMethod(methodName)
                 .lineStart(safeGetLine(invocation))
                 .lineEnd(safeGetEndLine(invocation))
                 .build();
@@ -1040,6 +1251,29 @@ public class Neo4jSpoonAnalyzer {
                 if (left != null && right != null) return left + right;
                 if (left != null) return left;
                 if (right != null) return right;
+            }
+        }
+
+        // Handle String.format() calls
+        if (expression instanceof CtInvocation<?> invocation) {
+            try {
+                CtExecutableReference<?> execRef = invocation.getExecutable();
+                if (execRef != null && "format".equals(execRef.getSimpleName())) {
+                    CtTypeReference<?> declaringType = execRef.getDeclaringType();
+                    if (declaringType != null && "java.lang.String".equals(declaringType.getQualifiedName())) {
+                        // Get the format string (first argument)
+                        List<CtExpression<?>> args = invocation.getArguments();
+                        if (!args.isEmpty()) {
+                            String formatStr = extractStringFromExpression(args.get(0), properties, valueFieldMapping, declaringClass);
+                            if (formatStr != null) {
+                                // Return the format string with placeholders (e.g., "https://example.com/api?lat=%f&lon=%f")
+                                return formatStr;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("[neo4j-analyzer] Could not extract from invocation: {}", e.getMessage());
             }
         }
 

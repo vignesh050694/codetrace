@@ -19,6 +19,8 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.List;
 
 /**
@@ -229,10 +231,32 @@ public class GraphController {
             @Parameter(description = "The unique ID of the node", required = true)
             @PathVariable String nodeId) {
         log.info("Getting node graph by ID for project: {}, nodeId: {}", projectId, nodeId);
-        validateProjectAccess(projectId);
 
-        GraphVisualizationResponse response = graphVisualizationService.getNodeGraphById(projectId, nodeId);
-        return ResponseEntity.ok(response);
+        try {
+            validateProjectAccess(projectId);
+            log.debug("Project access validated for projectId: {}", projectId);
+
+            log.debug("Fetching node graph from visualization service...");
+            GraphVisualizationResponse response = graphVisualizationService.getNodeGraphById(projectId, nodeId);
+
+            if (response == null) {
+                log.warn("Node graph returned null for projectId: {}, nodeId: {}", projectId, nodeId);
+                return ResponseEntity.noContent().build();
+            }
+
+            log.info("Successfully retrieved node graph for projectId: {}, nodeId: {} with {} nodes and {} edges",
+                    projectId, nodeId,
+                    response.getNodes() != null ? response.getNodes().size() : 0,
+                    response.getEdges() != null ? response.getEdges().size() : 0);
+
+            return ResponseEntity.ok(response);
+
+        }  catch (Exception e) {
+            log.error("[Graph/Nodes] Unexpected error occurred - projectId: {}, nodeId: {}", projectId, nodeId, e);
+            log.error("[Graph/Nodes] Exception type: {}, Message: {}", e.getClass().getName(), e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(500).build();
+        }
     }
 
     // ==================== Hierarchy Drill-Down API ====================

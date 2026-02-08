@@ -12,8 +12,12 @@ import java.util.Optional;
 @Repository
 public interface KafkaTopicNodeRepository extends Neo4jRepository<KafkaTopicNode, String> {
 
+    @Query("MATCH (t:KafkaTopic {name: $name}) " +
+           "RETURN t LIMIT 1")
     Optional<KafkaTopicNode> findByName(String name);
 
+    @Query("MATCH (t:KafkaTopic {projectId: $projectId, name: $name}) " +
+           "RETURN t LIMIT 1")
     Optional<KafkaTopicNode> findByProjectIdAndName(String projectId, String name);
 
     List<KafkaTopicNode> findByProjectId(String projectId);
@@ -22,13 +26,13 @@ public interface KafkaTopicNodeRepository extends Neo4jRepository<KafkaTopicNode
     KafkaTopicNode findOrCreate(String name, String projectId);
 
     @Query("MATCH (producer)-[:PRODUCES_TO]->(t:KafkaTopic {name: $topicName})<-[:CONSUMES_FROM]-(consumer) " +
-           "RETURN t, collect(DISTINCT producer) as producers, collect(DISTINCT consumer) as consumers")
+           "RETURN DISTINCT t LIMIT 1")
     Optional<KafkaTopicNode> findByNameWithProducersAndConsumers(String topicName);
 
     @Query("MATCH (t:KafkaTopic {projectId: $projectId}) " +
            "OPTIONAL MATCH (producer)-[:PRODUCES_TO]->(t) " +
            "OPTIONAL MATCH (consumer)-[:CONSUMES_FROM]->(t) " +
-           "RETURN t, collect(DISTINCT producer) as producers, collect(DISTINCT consumer) as consumers")
+           "RETURN DISTINCT t")
     List<KafkaTopicNode> findAllByProjectIdWithProducersAndConsumers(String projectId);
 
     @Query("MATCH (t:KafkaTopic)<-[:PRODUCES_TO]-(producer) " +
