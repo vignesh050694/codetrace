@@ -35,6 +35,11 @@ public class ImpactReportFormatter {
         // Summary section
         appendSummary(md, report);
 
+        // API URL Changes (CRITICAL - show before everything else)
+        if (!report.getApiUrlChanges().isEmpty()) {
+            appendApiUrlChanges(md, report.getApiUrlChanges());
+        }
+
         // Changed components
         if (!report.getChangedComponents().isEmpty()) {
             appendChangedComponents(md, report.getChangedComponents());
@@ -217,11 +222,31 @@ public class ImpactReportFormatter {
         md.append("| Request flows affected | ").append(report.getAffectedFlows().size()).append(" |\n");
         md.append("| New circular dependencies | ").append(report.getNewCircularDependencies().size()).append(" |\n");
 
+        if (!report.getApiUrlChanges().isEmpty()) {
+            md.append("| ⚠️ **API URL changes** | **").append(report.getApiUrlChanges().size()).append("** |\n");
+        }
+
         if (otherFiles > 0) {
             md.append("| Other files changed | ").append(otherFiles).append(" |\n");
         }
 
         md.append("\n");
+    }
+
+    private void appendApiUrlChanges(StringBuilder md, List<String> apiUrlChanges) {
+        md.append("### 🚨 CRITICAL: API URL Changes Detected\n\n");
+        md.append("> **WARNING:** The following service-to-service API endpoint URLs have been changed. ");
+        md.append("This **WILL BREAK** communication between services unless coordinated across all consumers.\n\n");
+
+        for (String change : apiUrlChanges) {
+            md.append("- ").append(change).append("\n");
+        }
+
+        md.append("\n**Required Actions:**\n");
+        md.append("1. ✋ **STOP** - Do not merge without coordination\n");
+        md.append("2. Identify all services consuming these endpoints\n");
+        md.append("3. Update consumers OR revert these URL changes\n");
+        md.append("4. Deploy changes in coordinated manner\n\n");
     }
 
     private void appendChangedComponents(StringBuilder md, List<ChangedComponent> components) {
