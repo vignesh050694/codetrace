@@ -54,7 +54,15 @@ public interface EndpointNodeRepository extends Neo4jRepository<EndpointNode, St
 
     List<EndpointNode> findByAppKey(String appKey);
 
-    // Create relationship from endpoint to external call
+    /**
+     * @deprecated This method creates an incorrect MAKES_EXTERNAL_CALL relationship from the target endpoint
+     * to the ExternalCall. The correct relationship structure is:
+     * Source Endpoint -> MAKES_EXTERNAL_CALL -> ExternalCall -> CALLS_ENDPOINT -> Target Endpoint
+     *
+     * MAKES_EXTERNAL_CALL relationships are created during graph building (Neo4jGraphBuilder).
+     * Do not use this method during resolution as it creates backwards relationships.
+     */
+    @Deprecated
     @Query("MATCH (e:Endpoint {id: $endpointId}), (ec:ExternalCall {id: $externalCallId}) " +
            "MERGE (e)-[:MAKES_EXTERNAL_CALL]->(ec) RETURN e")
     void createMakesExternalCallRel(String endpointId, String externalCallId);

@@ -17,6 +17,22 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Service for asynchronously resolving external API calls and Kafka topics in the graph.
+ *
+ * <h3>External Call Relationship Structure:</h3>
+ * <p>When Service B calls Service A's endpoint /A using RestTemplate/WebClient:</p>
+ * <pre>
+ * Endpoint B (Service B) -[MAKES_EXTERNAL_CALL]-> ExternalCall Node -[CALLS_ENDPOINT]-> Endpoint /A (Service A)
+ * </pre>
+ *
+ * <p>Important notes:</p>
+ * <ul>
+ *   <li>MAKES_EXTERNAL_CALL: Created during graph building (Neo4jGraphBuilder) from source endpoint/method to ExternalCall</li>
+ *   <li>CALLS_ENDPOINT: Created during resolution (this service) from ExternalCall to target endpoint via targetEndpointNode field</li>
+ *   <li>The ExternalCall node stores metadata about the HTTP call (method, URL, client type)</li>
+ * </ul>
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -28,7 +44,8 @@ public class AsyncExternalCallResolverService {
     private final ExternalCallResolutionService resolutionService;
 
     /**
-     * Asynchronously resolve all external calls for a project
+     * Asynchronously resolve all external calls for a project.
+     * Links ExternalCall nodes to their target endpoints via the CALLS_ENDPOINT relationship.
      */
     @Async
     public void resolveProjectExternalCalls(String projectId, String userId) {
@@ -73,16 +90,17 @@ public class AsyncExternalCallResolverService {
                     externalCall.setTargetControllerClass(resolved.getTargetControllerClass());
                     externalCall.setTargetHandlerMethod(resolved.getTargetHandlerMethod());
 
-                    EndpointNode matchedEndpointNode = null;
-                    // Try to find and assign the endpoint node
+                    // Find the target endpoint ID (for relationship creation)
+                    String targetEndpointId = null;
                     try {
                         if (resolved.getTargetEndpoint() != null && !resolved.getTargetEndpoint().isBlank()) {
                             Optional<EndpointNode> epOpt = endpointNodeRepository.findByFullPathAndMethod(
                                     projectId, resolved.getTargetEndpoint(), resolved.getHttpMethod());
                             if (epOpt.isPresent()) {
-                                matchedEndpointNode = epOpt.get();
-                                externalCall.setTargetEndpointNode(matchedEndpointNode);
+                                targetEndpointId = epOpt.get().getId();
+                                log.debug("Found target endpoint: {} (id={})", epOpt.get().getFullPath(), targetEndpointId);
                             } else {
+                                // Fallback: try pattern matching
                                 for (EndpointNode candidate : endpoints) {
                                     if (candidate.getHttpMethod() != null && resolved.getHttpMethod() != null
                                             && !candidate.getHttpMethod().equalsIgnoreCase(resolved.getHttpMethod())) {
@@ -92,37 +110,43 @@ public class AsyncExternalCallResolverService {
                                     if (candidatePath == null) continue;
 
                                     if (candidatePath.equals(resolved.getTargetEndpoint())) {
-                                        matchedEndpointNode = candidate;
-                                        externalCall.setTargetEndpointNode(candidate);
+                                        targetEndpointId = candidate.getId();
+                                        log.debug("Found target endpoint (exact match): {} (id={})", candidatePath, targetEndpointId);
                                         break;
                                     }
 
                                     String pattern = generatePathPattern(candidatePath);
                                     String resolvedPath = resolved.getTargetEndpoint();
                                     if (resolvedPath.matches("^" + pattern + "(/.*)?$")) {
-                                        matchedEndpointNode = candidate;
-                                        externalCall.setTargetEndpointNode(candidate);
+                                        targetEndpointId = candidate.getId();
+                                        log.debug("Found target endpoint (pattern match): {} (id={})", candidatePath, targetEndpointId);
                                         break;
                                     }
                                 }
                             }
                         }
                     } catch (Exception e) {
-                        log.debug("Failed to link external call to endpoint node: {}", e.getMessage());
+                        log.debug("Failed to find target endpoint for external call: {}", e.getMessage());
                     }
 
-                    // Save the external call node first to ensure it has an ID
-                    ExternalCallNode saved = externalCallNodeRepository.save(externalCall);
-                    log.debug("Saved ExternalCallNode id={} url={} resolved={}", saved.getId(), saved.getUrl(), saved.isResolved());
+                    // IMPORTANT: Clear the targetEndpointNode before saving to prevent Spring Data Neo4j
+                    // from re-persisting/modifying the target endpoint's relationships
+                    externalCall.setTargetEndpointNode(null);
 
-                    // If we matched an endpoint, ensure there is an explicit relationship in Neo4j
-                    try {
-                        if (matchedEndpointNode != null && saved.getId() != null) {
-                            endpointNodeRepository.createMakesExternalCallRel(matchedEndpointNode.getId(), saved.getId());
-                            log.info("Created MAKES_EXTERNAL_CALL relationship: endpointId={} -> externalCallId={}", matchedEndpointNode.getId(), saved.getId());
+                    // Save the external call node with resolved properties (but no targetEndpointNode)
+                    ExternalCallNode saved = externalCallNodeRepository.save(externalCall);
+                    log.debug("Saved ExternalCallNode id={} url={} resolved={} targetEndpoint={}",
+                            saved.getId(), saved.getUrl(), saved.isResolved(), saved.getTargetEndpoint());
+
+                    // Create CALLS_ENDPOINT relationship separately if target endpoint was found
+                    if (targetEndpointId != null) {
+                        try {
+                            externalCallNodeRepository.createCallsEndpointRelationship(saved.getId(), targetEndpointId);
+                            log.info("Created CALLS_ENDPOINT relationship: externalCallId={} -> endpointId={}",
+                                    saved.getId(), targetEndpointId);
+                        } catch (Exception e) {
+                            log.warn("Failed to create CALLS_ENDPOINT relationship: {}", e.getMessage());
                         }
-                    } catch (Exception e) {
-                        log.debug("Failed to create MAKES_EXTERNAL_CALL relationship: {}", e.getMessage());
                     }
 
                     resolvedCount++;
