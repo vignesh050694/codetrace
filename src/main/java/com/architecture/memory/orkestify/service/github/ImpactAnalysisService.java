@@ -30,6 +30,7 @@ public class ImpactAnalysisService {
     private final EndpointNodeRepository endpointNodeRepository;
     private final KafkaListenerNodeRepository kafkaListenerNodeRepository;
     private final MethodNodeRepository methodNodeRepository;
+    private final ApiBreakingChangeDetector apiBreakingChangeDetector;
 
     /**
      * Analyze the impact of changed files on the architecture.
@@ -78,13 +79,19 @@ public class ImpactAnalysisService {
         // Build affected flows
         List<AffectedFlow> affectedFlows = buildAffectedFlows(projectId, affectedEndpoints, affectedClassNames);
 
+        // Detect API URL changes in service clients
+        List<ApiBreakingChangeDetector.ApiUrlChange> urlChanges = apiBreakingChangeDetector.detectApiUrlChanges(changedFiles);
+        List<String> urlChangeDescriptions = urlChanges.stream()
+                .map(ApiBreakingChangeDetector.ApiUrlChange::getDescription)
+                .toList();
+
         // Filter to only new circular dependencies
         List<CircularDependency> newCircularDeps = circularDeps != null
                 ? circularDeps.stream().filter(CircularDependency::isNewInShadow).toList()
                 : List.of();
 
         // Build warnings
-        List<String> warnings = buildWarnings(changedFiles, javaFiles, changedComponents, newCircularDeps);
+        List<String> warnings = buildWarnings(changedFiles, javaFiles, changedComponents, newCircularDeps, urlChanges);
 
         ImpactReport report = ImpactReport.builder()
                 .changedComponents(changedComponents)
@@ -93,6 +100,7 @@ public class ImpactAnalysisService {
                 .newCircularDependencies(newCircularDeps)
                 .diffSummary(diff != null ? diff.getSummary() : null)
                 .warnings(warnings)
+                .apiUrlChanges(urlChangeDescriptions)
                 .build();
 
         log.info("Impact analysis complete: {} components, {} endpoints, {} flows, {} new circular deps",
@@ -350,8 +358,19 @@ public class ImpactAnalysisService {
     private List<String> buildWarnings(List<PullRequestFile> allFiles,
                                         List<PullRequestFile> javaFiles,
                                         List<ChangedComponent> components,
-                                        List<CircularDependency> newCircularDeps) {
+                                        List<CircularDependency> newCircularDeps,
+                                        List<ApiBreakingChangeDetector.ApiUrlChange> urlChanges) {
         List<String> warnings = new ArrayList<>();
+
+        // API URL changes (CRITICAL WARNING)
+        if (!urlChanges.isEmpty()) {
+            long highSeverityChanges = urlChanges.stream()
+                    .filter(c -> c.getSeverity() == ApiBreakingChangeDetector.Severity.HIGH)
+                    .count();
+            if (highSeverityChanges > 0) {
+                warnings.add("⚠️ CRITICAL: " + highSeverityChanges + " service-to-service API endpoint URL(s) changed - this WILL break integration!");
+            }
+        }
 
         // Non-Java files changed
         long nonJavaCount = allFiles.size() - javaFiles.size();

@@ -69,6 +69,13 @@ public class RiskAnalysisService {
     private int calculateBreakingChangesScore(ImpactReport report) {
         int score = 0;
 
+        // CRITICAL: API URL changes in service clients (service-to-service communication)
+        // This is the MOST CRITICAL type of breaking change
+        if (!report.getApiUrlChanges().isEmpty()) {
+            // Each API URL change is worth 15 points (can max out the 40 with just 3 changes)
+            score += Math.min(report.getApiUrlChanges().size() * 15, 35); // Up to 35 points
+        }
+
         // Controllers modified/removed (likely API changes)
         long controllerChanges = report.getChangedComponents().stream()
                 .filter(c -> "Controller".equals(c.getType()))
@@ -188,6 +195,16 @@ public class RiskAnalysisService {
         List<RiskFactor> factors = new ArrayList<>();
 
         // HIGH SEVERITY factors
+
+        // CRITICAL: API URL changes
+        if (!report.getApiUrlChanges().isEmpty()) {
+            factors.add(RiskFactor.builder()
+                    .severity(RiskFactor.Severity.HIGH)
+                    .description("Service-to-service API endpoint URLs changed (" +
+                            report.getApiUrlChanges().size() + " change(s)) - WILL break integration")
+                    .build());
+        }
+
         if (breakdown.getBreakingChanges() >= 20) {
             long controllerChanges = report.getChangedComponents().stream()
                     .filter(c -> "Controller".equals(c.getType()))

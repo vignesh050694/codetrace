@@ -42,6 +42,9 @@ public class ImpactReport {
     @Builder.Default
     private List<String> warnings = new ArrayList<>();
 
+    @Builder.Default
+    private List<String> apiUrlChanges = new ArrayList<>();
+
     /**
      * A component (controller, service, repository) directly changed in the PR.
      */
