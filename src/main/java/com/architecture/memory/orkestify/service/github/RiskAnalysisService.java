@@ -71,13 +71,16 @@ public class RiskAnalysisService {
 
         // CRITICAL: API URL changes in service clients (service-to-service communication)
         // This is the MOST CRITICAL type of breaking change - BREAKS relationships
-        if (!report.getApiUrlChanges().isEmpty()) {
-            // Each API URL change is worth 25 points - this should nearly max out breaking changes
-            // Because it BREAKS the graph relationship even if diff doesn't show it
-            score += Math.min(report.getApiUrlChanges().size() * 25, 40); // Up to 40 points
+        if (!report.getApiUrlChangeDetails().isEmpty()) {
+            // Score based on actual change severity
+            int urlChangeScore = report.getApiUrlChangeDetails().stream()
+                    .mapToInt(ImpactReport.ApiUrlChangeDetail::getBreakingChangesPoints)
+                    .sum();
 
-            log.warn("CRITICAL: {} API URL changes detected - service integration WILL break",
-                    report.getApiUrlChanges().size());
+            score += Math.min(urlChangeScore, 40); // Up to 40 points
+
+            log.warn("CRITICAL: {} API URL changes detected (score: {}) - service integration WILL break",
+                    report.getApiUrlChangeDetails().size(), urlChangeScore);
         }
 
         // Controllers modified/removed (likely API changes)
@@ -106,11 +109,22 @@ public class RiskAnalysisService {
         int score = 0;
 
         // API URL changes break downstream relationships - CRITICAL impact
-        // Even if graph diff doesn't show it, we know the relationship is broken
-        if (!report.getApiUrlChanges().isEmpty()) {
-            // Each URL change potentially breaks 1+ downstream services
-            // Assume at least 1 service per URL change is affected
-            score += Math.min(report.getApiUrlChanges().size() * 10, 20); // Up to 20 points
+        // Score based on ACTUAL consumer count
+        if (!report.getApiUrlChangeDetails().isEmpty()) {
+            int totalConsumers = report.getApiUrlChangeDetails().stream()
+                    .mapToInt(detail -> detail.getConsumers() != null ? detail.getConsumers().size() : 0)
+                    .sum();
+
+            if (totalConsumers > 0) {
+                // 5 points per consumer, up to 20 points
+                score += Math.min(totalConsumers * 5, 20);
+                log.info("API URL changes affect {} downstream consumer(s)", totalConsumers);
+            } else {
+                // No consumers detected - might be dead code or external call
+                // Give 5 points for the unknown risk
+                score += 5;
+                log.warn("API URL changes but no consumers detected - unknown impact");
+            }
         }
 
         // Affected endpoints
@@ -209,11 +223,20 @@ public class RiskAnalysisService {
         // HIGH SEVERITY factors
 
         // CRITICAL: API URL changes
-        if (!report.getApiUrlChanges().isEmpty()) {
+        if (!report.getApiUrlChangeDetails().isEmpty()) {
+            int totalConsumers = report.getApiUrlChangeDetails().stream()
+                    .mapToInt(detail -> detail.getConsumers() != null ? detail.getConsumers().size() : 0)
+                    .sum();
+
+            String consumerInfo = totalConsumers > 0 ?
+                    " affecting " + totalConsumers + " downstream consumer(s)" :
+                    " (no consumers detected - may be dead code or external)";
+
             factors.add(RiskFactor.builder()
                     .severity(RiskFactor.Severity.HIGH)
                     .description("Service-to-service API endpoint URLs changed (" +
-                            report.getApiUrlChanges().size() + " change(s)) - WILL break integration and graph relationships")
+                            report.getApiUrlChangeDetails().size() + " change(s))" +
+                            consumerInfo + " - WILL break integration")
                     .build());
 
             // Check for graph diff inconsistency

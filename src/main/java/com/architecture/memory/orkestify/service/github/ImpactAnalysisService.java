@@ -85,6 +85,10 @@ public class ImpactAnalysisService {
                 .map(ApiBreakingChangeDetector.ApiUrlChange::getDescription)
                 .toList();
 
+        // Build detailed URL change information with consumer analysis
+        List<ImpactReport.ApiUrlChangeDetail> urlChangeDetails = buildApiUrlChangeDetails(
+                projectId, urlChanges);
+
         // Filter to only new circular dependencies
         List<CircularDependency> newCircularDeps = circularDeps != null
                 ? circularDeps.stream().filter(CircularDependency::isNewInShadow).toList()
@@ -101,6 +105,7 @@ public class ImpactAnalysisService {
                 .diffSummary(diff != null ? diff.getSummary() : null)
                 .warnings(warnings)
                 .apiUrlChanges(urlChangeDescriptions)
+                .apiUrlChangeDetails(urlChangeDetails)
                 .build();
 
         log.info("Impact analysis complete: {} components, {} endpoints, {} flows, {} new circular deps",
@@ -390,5 +395,95 @@ public class ImpactAnalysisService {
         }
 
         return warnings;
+    }
+
+    /**
+     * Build detailed API URL change information including consumer analysis
+     */
+    private List<ImpactReport.ApiUrlChangeDetail> buildApiUrlChangeDetails(
+            String projectId,
+            List<ApiBreakingChangeDetector.ApiUrlChange> urlChanges) {
+
+        List<ImpactReport.ApiUrlChangeDetail> details = new ArrayList<>();
+
+        for (ApiBreakingChangeDetector.ApiUrlChange change : urlChanges) {
+            // Find potential consumers of the old URL
+            // This looks for any component that might be calling this endpoint
+            List<String> consumers = findUrlConsumers(projectId, change.getOldUrl());
+
+            details.add(ImpactReport.ApiUrlChangeDetail.builder()
+                    .className(change.getClassName())
+                    .oldUrl(change.getOldUrl())
+                    .newUrl(change.getNewUrl())
+                    .changeType(change.getChangeType().name())
+                    .breakingChangesPoints(change.getBreakingChangesPoints())
+                    .consumers(consumers)
+                    .build());
+
+            if (!consumers.isEmpty()) {
+                log.info("URL change in {} affects {} consumer(s): {}",
+                        change.getClassName(), consumers.size(), consumers);
+            } else {
+                log.warn("URL change in {} has NO detected consumers - may be dead code or external call",
+                        change.getClassName());
+            }
+        }
+
+        return details;
+    }
+
+    /**
+     * Find components that may be consuming the given URL
+     * This is a best-effort search based on the endpoint path
+     */
+    private List<String> findUrlConsumers(String projectId, String url) {
+        List<String> consumers = new ArrayList<>();
+
+        // Extract the path for matching (e.g., "/api/users/roll/" -> "/api/users")
+        String pathPrefix = extractPathPrefix(url);
+
+        if (pathPrefix == null) {
+            return consumers;
+        }
+
+        // Look for endpoints in the graph that match this path
+        // These would be the providers of this API
+        List<EndpointNode> matchingEndpoints = endpointNodeRepository.findByProjectId(projectId)
+                .stream()
+                .filter(ep -> ep.getFullPath() != null &&
+                        (ep.getFullPath().startsWith(pathPrefix) || pathPrefix.startsWith(ep.getFullPath())))
+                .toList();
+
+        // For each matching endpoint, find what calls it
+        for (EndpointNode endpoint : matchingEndpoints) {
+            String controllerClass = endpoint.getControllerClass();
+            if (controllerClass != null) {
+                // Find upstream callers of this controller
+                List<String> callers = findUpstreamCallers(projectId, controllerClass);
+                consumers.addAll(callers);
+            }
+        }
+
+        return consumers.stream().distinct().toList();
+    }
+
+    /**
+     * Extract a path prefix for matching (e.g., "/api/users/roll/" -> "/api/users")
+     */
+    private String extractPathPrefix(String url) {
+        if (url == null || !url.contains("/")) {
+            return null;
+        }
+
+        // Remove trailing slash
+        String path = url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+
+        // Get up to the second-to-last segment
+        int lastSlash = path.lastIndexOf('/');
+        if (lastSlash > 0) {
+            return path.substring(0, lastSlash);
+        }
+
+        return path;
     }
 }
