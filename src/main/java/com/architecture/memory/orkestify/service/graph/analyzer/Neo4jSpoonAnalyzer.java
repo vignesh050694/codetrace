@@ -1,5 +1,6 @@
 package com.architecture.memory.orkestify.service.graph.analyzer;
 
+import com.architecture.memory.orkestify.service.AnalyzerConfigurationService;
 import com.architecture.memory.orkestify.service.PropertyResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,45 +38,12 @@ import java.util.stream.Collectors;
 public class Neo4jSpoonAnalyzer {
 
     private final PropertyResolver propertyResolver;
+    private final AnalyzerConfigurationService configService;
 
-    private static final Set<String> MAPPING_ANNOTATIONS = Set.of(
-            "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping", "RequestMapping"
-    );
-
-    private static final Map<String, String> ANNOTATION_TO_HTTP_METHOD = Map.of(
-            "GetMapping", "GET",
-            "PostMapping", "POST",
-            "PutMapping", "PUT",
-            "DeleteMapping", "DELETE",
-            "PatchMapping", "PATCH",
-            "RequestMapping", "REQUEST"
-    );
-
-    private static final Set<String> REST_TEMPLATE_METHODS = Set.of(
-            "getForObject", "getForEntity", "postForObject", "postForEntity", "put", "delete", "exchange"
-    );
-
-    private static final Set<String> WEBCLIENT_HTTP_METHODS = Set.of(
-            "get", "post", "put", "delete", "patch", "method"
-    );
-
-    private static final Set<String> KAFKA_PRODUCER_METHODS = Set.of("send", "sendDefault");
-    private static final Set<String> KAFKA_PRODUCER_TYPES = Set.of("KafkaTemplate", "ReactiveKafkaProducerTemplate");
 
     // HttpURLConnection methods that indicate HTTP calls
     private static final Set<String> HTTP_URL_CONNECTION_METHODS = Set.of(
             "openConnection", "setRequestMethod", "getInputStream", "getOutputStream", "connect"
-    );
-
-    // Repository methods that indicate database operations
-    private static final Set<String> REPOSITORY_WRITE_METHODS = Set.of(
-            "save", "saveAll", "saveAndFlush", "saveAllAndFlush",
-            "delete", "deleteAll", "deleteById", "deleteAllById", "deleteInBatch", "deleteAllInBatch",
-            "insert", "update", "upsert"
-    );
-    private static final Set<String> REPOSITORY_READ_METHODS = Set.of(
-            "findById", "findAll", "findAllById", "existsById", "count",
-            "getById", "getReferenceById", "getOne"
     );
 
     // ========================= PUBLIC API =========================
@@ -184,6 +152,12 @@ public class Neo4jSpoonAnalyzer {
             if (componentType == SpringComponentType.UNKNOWN) continue;
 
             ParsedComponent component = parseComponent(ctType, componentType, model, properties, valueFieldMapping, feignClients);
+
+            // Check if this component has already been processed to avoid duplicates
+            if (app.getComponentIndex().containsKey(component.getQualifiedName())) {
+                log.debug("[neo4j-analyzer] Skipping duplicate component: {}", component.getQualifiedName());
+                continue;
+            }
 
             switch (componentType) {
                 case CONTROLLER, REST_CONTROLLER -> app.getControllers().add(component);
@@ -419,9 +393,9 @@ public class Neo4jSpoonAnalyzer {
         for (CtMethod<?> method : ctType.getMethods()) {
             for (CtAnnotation<?> ann : method.getAnnotations()) {
                 String annName = ann.getAnnotationType().getSimpleName();
-                if (!MAPPING_ANNOTATIONS.contains(annName)) continue;
+                if (!configService.getMappingAnnotations().contains(annName)) continue;
 
-                String httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annName, "REQUEST");
+                String httpMethod = configService.getAnnotationToHttpMethod().getOrDefault(annName, "REQUEST");
                 String path = extractPath(ann, basePath);
 
                 ParsedMethod pm = ParsedMethod.builder()
@@ -914,7 +888,7 @@ public class Neo4jSpoonAnalyzer {
     // ========================= EXTERNAL CALL BUILDERS =========================
 
     private boolean isRestTemplateCall(String declaredType, String methodName, CtInvocation<?> invocation) {
-        if (!REST_TEMPLATE_METHODS.contains(methodName)) return false;
+        if (!configService.getRestTemplateMethods().contains(methodName)) return false;
         if (declaredType.endsWith("RestTemplate")) return true;
         CtExpression<?> target = invocation.getTarget();
         if (target != null && target.getType() != null) {
@@ -925,13 +899,13 @@ public class Neo4jSpoonAnalyzer {
 
     private boolean isWebClientCall(String declaredType, String methodName, CtInvocation<?> invocation) {
         if (declaredType.endsWith("WebClient")) {
-            return WEBCLIENT_HTTP_METHODS.contains(methodName) || "uri".equals(methodName);
+            return configService.getWebClientHttpMethods().contains(methodName) || "uri".equals(methodName);
         }
         CtExpression<?> target = invocation.getTarget();
         if (target != null && target.getType() != null) {
             String typeName = target.getType().getQualifiedName();
             return typeName.endsWith("WebClient")
-                    || (typeName.contains("WebClient") && WEBCLIENT_HTTP_METHODS.contains(methodName));
+                    || (typeName.contains("WebClient") && configService.getWebClientHttpMethods().contains(methodName));
         }
         return false;
     }
@@ -962,27 +936,27 @@ public class Neo4jSpoonAnalyzer {
     }
 
     private boolean isKafkaProducerCall(String declaredType, String methodName) {
-        return KAFKA_PRODUCER_METHODS.contains(methodName)
-                && KAFKA_PRODUCER_TYPES.stream().anyMatch(declaredType::endsWith);
+        return configService.getKafkaProducerMethods().contains(methodName)
+                && configService.getKafkaProducerTypes().stream().anyMatch(declaredType::endsWith);
     }
 
     private boolean isRepositoryCall(String declaredType, String methodName) {
         // Check if it's a repository type and uses a repository method
         boolean isRepoType = declaredType.endsWith("Repository") ||
                            declaredType.contains("Repository<");
-        boolean isRepoMethod = REPOSITORY_WRITE_METHODS.contains(methodName) ||
-                             REPOSITORY_READ_METHODS.contains(methodName);
+        boolean isRepoMethod = configService.getRepositoryWriteMethods().contains(methodName) ||
+                             configService.getRepositoryReadMethods().contains(methodName);
         return isRepoType && isRepoMethod;
     }
 
     private String getRepositoryOperation(String methodName) {
-        if (REPOSITORY_WRITE_METHODS.contains(methodName)) {
+        if (configService.getRepositoryWriteMethods().contains(methodName)) {
             if (methodName.startsWith("save")) return "SAVE";
             if (methodName.startsWith("delete")) return "DELETE";
             if (methodName.equals("insert")) return "INSERT";
             if (methodName.equals("update")) return "UPDATE";
             if (methodName.equals("upsert")) return "UPSERT";
-        } else if (REPOSITORY_READ_METHODS.contains(methodName)) {
+        } else if (configService.getRepositoryReadMethods().contains(methodName)) {
             return "READ";
         }
         return "UNKNOWN";
@@ -1012,7 +986,7 @@ public class Neo4jSpoonAnalyzer {
                                                            Map<String, String> properties,
                                                            Map<String, String> valueFieldMapping,
                                                            CtType<?> declaringClass) {
-        String httpMethod = WEBCLIENT_HTTP_METHODS.contains(methodName)
+        String httpMethod = configService.getWebClientHttpMethods().contains(methodName)
                 ? methodName.toUpperCase(Locale.ROOT) : "UNKNOWN";
         String url = extractUrlFromWebClientChain(invocation, properties, valueFieldMapping, declaringClass);
 
@@ -1038,8 +1012,8 @@ public class Neo4jSpoonAnalyzer {
                 String basePath = extractBasePath(feignMethod.getDeclaringType());
                 for (CtAnnotation<?> ann : feignMethod.getAnnotations()) {
                     String annName = ann.getAnnotationType().getSimpleName();
-                    if (MAPPING_ANNOTATIONS.contains(annName)) {
-                        httpMethod = ANNOTATION_TO_HTTP_METHOD.getOrDefault(annName, "REQUEST");
+                    if (configService.getMappingAnnotations().contains(annName)) {
+                        httpMethod = configService.getAnnotationToHttpMethod().getOrDefault(annName, "REQUEST");
                         url = extractPath(ann, basePath);
                         break;
                     }
@@ -1244,13 +1218,80 @@ public class Neo4jSpoonAnalyzer {
             return resolveFieldRead(fieldRead, properties, valueFieldMapping);
         }
 
+        // Resolve local variable reads (e.g., userServiceUrl + "/path" + id)
+        if (expression instanceof CtVariableRead<?> variableRead) {
+            String varName = variableRead.getVariable().getSimpleName();
+            // Try to resolve from enclosing method local variables / assignments
+            CtMethod<?> enclosingMethod = findEnclosingMethod(expression);
+            if (enclosingMethod != null) {
+                // Search for local variable declarations with initializer
+                for (Object element : enclosingMethod.getElements(e -> e instanceof CtLocalVariable)) {
+                    try {
+                        CtLocalVariable<?> local = (CtLocalVariable<?>) element;
+                        if (local.getSimpleName().equals(varName) && local.getDefaultExpression() != null) {
+                            String resolved = extractStringFromExpression(local.getDefaultExpression(), properties, valueFieldMapping, declaringClass);
+                            if (resolved != null) return resolved;
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                // Search for assignments to the variable earlier in the method
+                for (Object element : enclosingMethod.getElements(e -> e instanceof CtAssignment)) {
+                    try {
+                        CtAssignment<?, ?> assign = (CtAssignment<?, ?>) element;
+                        String assignedTo = assign.getAssigned().toString();
+                        // Simple name match
+                        if (assignedTo.equals(varName) || assignedTo.endsWith("." + varName)) {
+                            String resolved = extractStringFromExpression((CtExpression<?>) assign.getAssignment(), properties, valueFieldMapping, declaringClass);
+                            if (resolved != null) return resolved;
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                // Check if it's a method parameter - these are dynamic at runtime
+                try {
+                    boolean isMethodParam = enclosingMethod.getParameters().stream()
+                            .anyMatch(param -> param.getSimpleName().equals(varName));
+                    if (isMethodParam) {
+                        log.debug("[neo4j-analyzer] Variable '{}' is a method parameter, treating as <dynamic>", varName);
+                        return "<dynamic>";
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            // Fall back: try to resolve as a field read if possible
+            try {
+                if (variableRead.getVariable() instanceof CtFieldReference) {
+                    CtFieldRead<?> fr = variableRead.getParent(CtFieldRead.class);
+                    if (fr != null) return resolveFieldRead(fr, properties, valueFieldMapping);
+                }
+            } catch (Exception ignored) {}
+
+            // Could not resolve - return <dynamic> placeholder for unresolved variables
+            log.debug("[neo4j-analyzer] Variable '{}' could not be resolved, treating as <dynamic>", varName);
+            return "<dynamic>";
+        }
+
         if (expression instanceof CtBinaryOperator<?> binary) {
             if (binary.getKind() == BinaryOperatorKind.PLUS) {
                 String left = extractStringFromExpression(binary.getLeftHandOperand(), properties, valueFieldMapping, declaringClass);
                 String right = extractStringFromExpression(binary.getRightHandOperand(), properties, valueFieldMapping, declaringClass);
-                if (left != null && right != null) return left + right;
-                if (left != null) return left;
-                if (right != null) return right;
+
+                // Handle concatenation where one or both parts might be unresolved (dynamic)
+                if (left != null && right != null) {
+                    return left + right;
+                }
+                // If one side is null (unresolved variable), treat it as <dynamic>
+                if (left != null && right == null) {
+                    return left + "<dynamic>";
+                }
+                if (left == null && right != null) {
+                    return "<dynamic>" + right;
+                }
+                // Both null - return dynamic placeholder
+                if (left == null && right == null) {
+                    return "<dynamic>";
+                }
             }
         }
 
@@ -1280,65 +1321,13 @@ public class Neo4jSpoonAnalyzer {
         return null;
     }
 
-    private String resolveFieldRead(CtFieldRead<?> fieldRead, Map<String, String> properties,
-                                     Map<String, String> valueFieldMapping) {
-        try {
-            CtFieldReference<?> fieldRef = fieldRead.getVariable();
-            if (fieldRef == null) return null;
-
-            String fieldName = fieldRef.getSimpleName();
-            CtTypeReference<?> declaringType = fieldRef.getDeclaringType();
-
-            if (declaringType != null) {
-                String qualifiedName = declaringType.getQualifiedName() + "." + fieldName;
-                String resolved = valueFieldMapping.get(qualifiedName);
-                if (resolved != null && !resolved.startsWith("${")) return resolved;
-
-                // Suffix match
-                for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
-                    if (entry.getKey().endsWith("." + fieldName)) return entry.getValue();
-                }
-
-                // Static constant from AST
-                try {
-                    CtField<?> fieldDecl = fieldRef.getFieldDeclaration();
-                    if (fieldDecl != null && fieldDecl.isStatic() && fieldDecl.isFinal()) {
-                        CtExpression<?> defaultExpr = fieldDecl.getDefaultExpression();
-                        if (defaultExpr instanceof CtLiteral<?> lit) {
-                            Object val = lit.getValue();
-                            if (val instanceof String s) {
-                                if (s.contains("${")) {
-                                    return propertyResolver.resolveProperty(s, properties);
-                                }
-                                return s;
-                            }
-                        }
-                    }
-                } catch (Exception ex) {
-                    // ignore
-                }
-            }
-        } catch (Exception e) {
-            // ignore
+    // Helper: find enclosing method for a CtElement by walking parents
+    private CtMethod<?> findEnclosingMethod(CtElement element) {
+        CtElement current = element;
+        while (current != null && !(current instanceof CtMethod)) {
+            current = current.getParent();
         }
-        return null;
-    }
-
-    private String resolveRestTemplateHttpMethod(String methodName, CtInvocation<?> invocation) {
-        if ("exchange".equals(methodName)) {
-            for (CtExpression<?> arg : invocation.getArguments()) {
-                String text = arg.toString();
-                if (text != null && text.contains("HttpMethod")) {
-                    return text.replace("HttpMethod.", "");
-                }
-            }
-            return "REQUEST";
-        }
-        if (methodName.startsWith("get")) return "GET";
-        if (methodName.startsWith("post")) return "POST";
-        if ("put".equals(methodName)) return "PUT";
-        if ("delete".equals(methodName)) return "DELETE";
-        return "REQUEST";
+        return (CtMethod<?>) current;
     }
 
     // ========================= VALUE FIELD MAPPING =========================
@@ -1544,6 +1533,16 @@ public class Neo4jSpoonAnalyzer {
 
     private boolean isStandardType(String className) {
         if (className == null) return true;
+
+        // Check if this package is explicitly allowed for analysis
+        Set<String> allowedPackages = configService.getAllowedAnalysisPackages();
+        for (String allowedPackage : allowedPackages) {
+            if (className.startsWith(allowedPackage)) {
+                return false; // Not a standard type - should be analyzed
+            }
+        }
+
+        // Otherwise, filter out standard library and framework packages
         return className.startsWith("java.")
                 || className.startsWith("javax.")
                 || className.startsWith("jakarta.")
@@ -1589,5 +1588,133 @@ public class Neo4jSpoonAnalyzer {
 
     private String safeGetFilePath(CtElement element) {
         try { return element.getPosition().getFile().getAbsolutePath(); } catch (Exception e) { return ""; }
+    }
+
+    private String resolveRestTemplateHttpMethod(String methodName, CtInvocation<?> invocation) {
+        if ("exchange".equals(methodName)) {
+            String httpMethod = extractHttpMethodFromArgs(invocation.getArguments());
+            return httpMethod != null ? httpMethod : "REQUEST";
+        }
+        if (methodName.startsWith("get")) return "GET";
+        if (methodName.startsWith("post")) return "POST";
+        if ("put".equals(methodName)) return "PUT";
+        if ("delete".equals(methodName)) return "DELETE";
+        return "REQUEST";
+    }
+
+    private String extractHttpMethodFromArgs(List<? extends CtExpression<?>> arguments) {
+        for (CtExpression<?> arg : arguments) {
+            if (arg instanceof CtLiteral) {
+                Object value = ((CtLiteral<?>) arg).getValue();
+                if (value instanceof String) return value.toString();
+            }
+            String text = arg.toString();
+            if (text != null && text.contains("HttpMethod")) {
+                return text.replace("HttpMethod.", "");
+            }
+        }
+        return null;
+    }
+
+    private String resolveFieldRead(CtFieldRead<?> fieldRead,
+                                    Map<String, String> properties,
+                                    Map<String, String> valueFieldMapping) {
+        try {
+            CtFieldReference<?> fieldRef = fieldRead.getVariable();
+            if (fieldRef == null) return null;
+
+            String fieldName = fieldRef.getSimpleName();
+            CtTypeReference<?> declaringType = fieldRef.getDeclaringType();
+
+            if (declaringType != null) {
+                String qualifiedName = declaringType.getQualifiedName() + "." + fieldName;
+
+                // Try exact match in value field mapping
+                String resolved = valueFieldMapping.get(qualifiedName);
+                if (resolved != null && !resolved.startsWith("${")) return resolved;
+
+                // Try suffix match (field name only)
+                for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
+                    if (entry.getKey().endsWith("." + fieldName)) return entry.getValue();
+                }
+
+                // Try resolving static constant directly from AST
+                try {
+                    CtField<?> fieldDecl = fieldRef.getFieldDeclaration();
+                    if (fieldDecl != null && fieldDecl.isStatic() && fieldDecl.isFinal()) {
+                        CtExpression<?> defaultExpr = fieldDecl.getDefaultExpression();
+                        if (defaultExpr instanceof CtLiteral) {
+                            Object literalVal = ((CtLiteral<?>) defaultExpr).getValue();
+                            if (literalVal instanceof String) {
+                                String constValue = (String) literalVal;
+                                if (constValue.contains("${")) {
+                                    constValue = propertyResolver.resolveProperty(constValue, properties);
+                                }
+                                return constValue;
+                            }
+                        }
+                    }
+                } catch (Exception ex) {
+                    log.debug("[neo4j-analyzer] Could not resolve field declaration: {}", qualifiedName);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[neo4j-analyzer] Error resolving field read: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private String resolveFieldByName(String fieldName, CtType<?> declaringClass,
+                                      Map<String, String> properties,
+                                      Map<String, String> valueFieldMapping) {
+        // Try with declaring class qualifier
+        if (declaringClass != null) {
+            String qualified = declaringClass.getQualifiedName() + "." + fieldName;
+            String resolved = valueFieldMapping.get(qualified);
+            if (resolved != null && !resolved.startsWith("${")) return resolved;
+
+            // Try resolving the placeholder value
+            if (resolved != null && propertyResolver.hasPlaceholders(resolved)) {
+                String fullyResolved = propertyResolver.resolveProperty(resolved, properties);
+                if (!fullyResolved.startsWith("${")) return fullyResolved;
+            }
+        }
+
+        // Try without qualifier
+        String resolved = valueFieldMapping.get(fieldName);
+        if (resolved != null && !resolved.startsWith("${")) return resolved;
+
+        // Try suffix match
+        for (Map.Entry<String, String> entry : valueFieldMapping.entrySet()) {
+            if (entry.getKey().endsWith("." + fieldName)) return entry.getValue();
+        }
+
+        return null;
+    }
+
+    private String joinUrlParts(String left, String right) {
+        String safeLeft = stripDynamicTokens(left);
+        String safeRight = stripDynamicTokens(right);
+
+        if (safeLeft == null || safeLeft.isEmpty()) return safeRight == null ? "" : safeRight;
+        if (safeRight == null || safeRight.isEmpty()) return safeLeft;
+        return safeLeft + safeRight;
+    }
+
+    private String normalizeUrl(String url) {
+        if (url == null) return "";
+        String normalized = stripDynamicTokens(url);
+        if (normalized == null || normalized.isEmpty()) return "";
+
+        // Collapse multiple slashes after removing dynamic tokens
+        normalized = normalized.replaceAll("/{2,}", "/");
+
+        if (normalized.startsWith("<dynamic>/")) return normalized.substring("<dynamic>".length());
+        return normalized;
+    }
+
+    private String stripDynamicTokens(String value) {
+        if (value == null) return null;
+        return value.replace("<dynamic>", "{dynamic}");
     }
 }

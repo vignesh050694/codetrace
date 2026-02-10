@@ -1,0 +1,16 @@
+/**
+ * This request starts at the endpoint {{ENTRY_ENDPOINT}}.
+ *
+ * The endpoint belongs to the controller {{ENTRY_CONTROLLER}}
+ * and is handled by the method {{ENTRY_HANDLER_METHOD}}.
+ *
+ * During execution, the endpoint invokes the method
+ * {{INTERNAL_METHOD_NAME}} defined in {{INTERNAL_METHOD_CLASS}}.
+ *
+ * This method makes an external HTTP {{EXTERNAL_HTTP_METHOD}}
+ * call to {{EXTERNAL_ENDPOINT}} using {{EXTERNAL_CLIENT_TYPE}}.
+ *
+ * The external call resolves to the endpoint {{RESOLVED_ENDPOINT}},
+ * which belongs to the controller {{RESOLVED_CONTROLLER}}.
+ */
+

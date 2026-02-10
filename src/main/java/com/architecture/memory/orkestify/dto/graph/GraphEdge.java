@@ -17,7 +17,8 @@ import java.util.Map;
 @AllArgsConstructor
 public class GraphEdge {
 
-    private String id;
+    private String id;              // UUID for internal use
+    private String canonicalId;     // Stable, deterministic ID for cross-branch comparison
     private String source;      // Source node ID
     private String target;      // Target node ID
     private String type;        // CALLS, PRODUCES_TO, CONSUMES_FROM, HAS_ENDPOINT, etc.

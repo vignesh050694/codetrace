@@ -21,6 +21,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.List;
 
 /**
@@ -207,11 +209,31 @@ public class GraphController {
             @Parameter(description = "Node type to filter by", required = true,
                        example = "SERVICE")
             @RequestParam String type) {
-        log.info("Getting nodes by type for project: {}, type: {}", projectId, type);
-        validateProjectAccess(projectId);
+        log.info("[GraphController] Getting nodes by type - project: {}, type: {}", projectId, type);
 
-        NodeListResponse response = graphVisualizationService.getNodesByType(projectId, type);
-        return ResponseEntity.ok(response);
+        try {
+            validateProjectAccess(projectId);
+            log.debug("[GraphController] Project access validated");
+
+            log.debug("[GraphController] Calling graphVisualizationService.getNodesByType...");
+            NodeListResponse response = graphVisualizationService.getNodesByType(projectId, type);
+
+            log.info("[GraphController] Successfully retrieved {} nodes of type {}",
+                    response.getTotalCount(), type);
+            return ResponseEntity.ok(response);
+
+        } catch (StackOverflowError soe) {
+            log.error("[GraphController] StackOverflowError while getting nodes - project: {}, type: {}. " +
+                    "This is likely caused by circular reference in entity relationships (e.g., Endpoint -> ExternalCall -> Endpoint). " +
+                    "Check @JsonIgnore annotations on bidirectional relationships.",
+                    projectId, type, soe);
+            throw new RuntimeException("StackOverflowError: Circular reference detected when loading " + type + " nodes. " +
+                    "Please check entity relationship annotations.", soe);
+        } catch (Exception e) {
+            log.error("[GraphController] Error getting nodes by type - project: {}, type: {}, error: {}",
+                    projectId, type, e.getMessage(), e);
+            throw e;
+        }
     }
 
     /**
@@ -226,7 +248,7 @@ public class GraphController {
                            "dependencies are included recursively. For example, an Endpoint will include " +
                            "all called Methods, their called Methods, External calls, Kafka topics, etc.")
     @GetMapping("/nodes/{nodeId}")
-    public ResponseEntity<GraphVisualizationResponse> getNodeGraphById(
+    public ResponseEntity<NodeGraphByIdResponse> getNodeGraphById(
             @PathVariable String projectId,
             @Parameter(description = "The unique ID of the node", required = true)
             @PathVariable String nodeId) {
@@ -244,12 +266,21 @@ public class GraphController {
                 return ResponseEntity.noContent().build();
             }
 
+            // Load template and populate narrative
+            String template = new String(Files.readAllBytes(Paths.get("src/main/resources/ide-narrative-template.txt")));
+            String narrative = NarrativeTemplatePopulator.populate(template, response);
+
+            NodeGraphByIdResponse result = NodeGraphByIdResponse.builder()
+                    .graph(response)
+                    .narrative(narrative)
+                    .build();
+
             log.info("Successfully retrieved node graph for projectId: {}, nodeId: {} with {} nodes and {} edges",
                     projectId, nodeId,
                     response.getNodes() != null ? response.getNodes().size() : 0,
                     response.getEdges() != null ? response.getEdges().size() : 0);
 
-            return ResponseEntity.ok(response);
+            return ResponseEntity.ok(result);
 
         }  catch (Exception e) {
             log.error("[Graph/Nodes] Unexpected error occurred - projectId: {}, nodeId: {}", projectId, nodeId, e);

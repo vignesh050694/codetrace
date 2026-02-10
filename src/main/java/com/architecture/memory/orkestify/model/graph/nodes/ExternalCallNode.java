@@ -1,8 +1,10 @@
 package com.architecture.memory.orkestify.model.graph.nodes;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 import org.springframework.data.neo4j.core.schema.GeneratedValue;
 import org.springframework.data.neo4j.core.schema.Id;
@@ -21,6 +23,9 @@ public class ExternalCallNode {
     @Id
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
+
+    @Property("canonicalId")
+    private String canonicalId;
 
     @Property("clientType")
     private String clientType; // RestTemplate, WebClient, Feign
@@ -69,6 +74,10 @@ public class ExternalCallNode {
     private String resolutionReason;
 
     // Link to the resolved endpoint if found within the same project
+    // @JsonIgnore prevents circular reference: Endpoint -> ExternalCall -> Endpoint -> ...
+    // @EqualsAndHashCode.Exclude prevents circular reference in Lombok-generated hashCode()
+    @JsonIgnore
+    @EqualsAndHashCode.Exclude
     @Relationship(type = "CALLS_ENDPOINT", direction = Relationship.Direction.OUTGOING)
     private EndpointNode targetEndpointNode;
 }

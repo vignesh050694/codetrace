@@ -83,6 +83,16 @@ public class ExternalCallResolutionService {
     private boolean matchesPath(String urlToMatch, EndpointRegistry endpoint) {
         String endpointPath = endpoint.getPath();
 
+        // If the URL begins with our dynamic placeholder, strip it before matching
+        // e.g. "<dynamic>/api/users/123" -> "/api/users/123"
+        if (urlToMatch != null && urlToMatch.startsWith("<dynamic>")) {
+            urlToMatch = urlToMatch.replaceFirst("^<dynamic>*", "");
+            if (urlToMatch.isEmpty()) {
+                // Nothing left to match (entire URL was dynamic), treat as non-match
+                return false;
+            }
+        }
+
         // Exact match
         if (urlToMatch.equals(endpointPath)) {
             return true;

@@ -9,6 +9,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
 
@@ -81,7 +83,15 @@ public class GitHubWebhookController {
         try {
             com.fasterxml.jackson.databind.ObjectMapper mapper =
                     new com.fasterxml.jackson.databind.ObjectMapper();
-            payload = mapper.readValue(rawBody, WebhookPayload.class);
+
+            // GitHub can send application/json or application/x-www-form-urlencoded (payload=...)
+            String bodyText = new String(rawBody, StandardCharsets.UTF_8).trim();
+            if (bodyText.startsWith("payload=")) {
+                String json = URLDecoder.decode(bodyText.substring("payload=".length()), StandardCharsets.UTF_8);
+                payload = mapper.readValue(json, WebhookPayload.class);
+            } else {
+                payload = mapper.readValue(rawBody, WebhookPayload.class);
+            }
         } catch (Exception e) {
             log.error("Failed to parse webhook payload: {}", e.getMessage());
             return ResponseEntity.badRequest()

@@ -23,6 +23,9 @@ public class DatabaseTableNode {
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
 
+    @Property("canonicalId")
+    private String canonicalId;
+
     @Property("tableName")
     private String tableName;
 

@@ -31,6 +31,7 @@ public class GraphVisualizationService {
     private final ExternalCallNodeRepository externalCallNodeRepository;
     private final DatabaseTableNodeRepository databaseTableNodeRepository;
     private final Neo4jClient neo4jClient;
+    private final CanonicalIdGenerator canonicalIdGenerator;
 
     // Node type colors for visualization
     private static final Map<String, String> NODE_COLORS = Map.of(
@@ -617,63 +618,188 @@ public class GraphVisualizationService {
      * DatabaseTable, KafkaTopic, KafkaListener, Configuration, ExternalCall
      */
     public NodeListResponse getNodesByType(String projectId, String nodeType) {
-        log.info("Getting nodes by type for project: {}, type: {}", projectId, nodeType);
+        log.info("[GraphViz] Getting nodes by type - project: {}, type: {}", projectId, nodeType);
 
         List<GraphNode> nodes = new ArrayList<>();
 
-        switch (nodeType) {
-            case "Application":
-                List<ApplicationNode> apps = applicationNodeRepository.findByProjectId(projectId);
-                nodes = apps.stream().map(this::convertApplicationToGraphNode).collect(Collectors.toList());
-                break;
-            case "Controller":
-                List<ControllerNode> controllers = controllerNodeRepository.findByProjectId(projectId);
-                nodes = controllers.stream().map(this::convertControllerToGraphNode).collect(Collectors.toList());
-                break;
-            case "Endpoint":
-                List<EndpointNode> endpoints = endpointNodeRepository.findByProjectId(projectId);
-                nodes = endpoints.stream().map(this::convertEndpointToGraphNode).collect(Collectors.toList());
-                break;
-            case "Service":
-                List<ServiceNode> services = serviceNodeRepository.findByProjectId(projectId);
-                nodes = services.stream().map(this::convertServiceToGraphNode).collect(Collectors.toList());
-                break;
-            case "Method":
-                List<MethodNode> methods = methodNodeRepository.findByProjectId(projectId);
-                nodes = methods.stream().map(this::convertMethodToGraphNode).collect(Collectors.toList());
-                break;
-            case "Repository":
-                List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectId(projectId);
-                nodes = repositories.stream().map(this::convertRepositoryToGraphNode).collect(Collectors.toList());
-                break;
-            case "KafkaTopic":
-                List<KafkaTopicNode> topics = kafkaTopicNodeRepository.findByProjectId(projectId);
-                nodes = topics.stream().map(this::convertKafkaTopicToGraphNode).collect(Collectors.toList());
-                break;
-            case "KafkaListener":
-                List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectId(projectId);
-                nodes = listeners.stream().map(this::convertKafkaListenerToGraphNode).collect(Collectors.toList());
-                break;
-            case "DatabaseTable":
-                List<RepositoryClassNode> reposWithTables = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
-                for (RepositoryClassNode repo : reposWithTables) {
-                    if (repo.getAccessesTables() != null) {
-                        for (DatabaseTableNode table : repo.getAccessesTables()) {
-                            nodes.add(convertDatabaseTableToGraphNode(table));
+        try {
+            switch (nodeType) {
+                case "Application":
+                    log.debug("[GraphViz] Fetching Application nodes for project: {}", projectId);
+                    List<ApplicationNode> apps = applicationNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} Application nodes", apps.size());
+                    nodes = apps.stream()
+                            .map(app -> {
+                                try {
+                                    return convertApplicationToGraphNode(app);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting Application node id={}: {}", app.getId(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "Controller":
+                    log.debug("[GraphViz] Fetching Controller nodes for project: {}", projectId);
+                    List<ControllerNode> controllers = controllerNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} Controller nodes", controllers.size());
+                    nodes = controllers.stream()
+                            .map(ctrl -> {
+                                try {
+                                    return convertControllerToGraphNode(ctrl);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting Controller node id={}, className={}: {}",
+                                            ctrl.getId(), ctrl.getClassName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "Endpoint":
+                    log.debug("[GraphViz] Fetching Endpoint nodes for project: {}", projectId);
+                    List<EndpointNode> endpoints = endpointNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} Endpoint nodes, starting conversion...", endpoints.size());
+                    int count = 0;
+                    for (EndpointNode endpoint : endpoints) {
+                        try {
+                            log.trace("[GraphViz] Converting Endpoint {}/{}: id={}, path={}, method={}",
+                                    ++count, endpoints.size(), endpoint.getId(), endpoint.getFullPath(), endpoint.getHttpMethod());
+                            GraphNode node = convertEndpointToGraphNode(endpoint);
+                            nodes.add(node);
+                            log.trace("[GraphViz] Successfully converted Endpoint {}/{}", count, endpoints.size());
+                        } catch (Exception e) {
+                            log.error("[GraphViz] Error converting Endpoint node {}/{}: id={}, path={}, method={}, error: {}",
+                                    count, endpoints.size(), endpoint.getId(), endpoint.getFullPath(),
+                                    endpoint.getHttpMethod(), e.getMessage(), e);
+                            throw new RuntimeException("Failed to convert Endpoint node: " + endpoint.getId(), e);
                         }
                     }
-                }
-                break;
-            default:
-                log.warn("Unknown node type: {}", nodeType);
-        }
+                    log.info("[GraphViz] Successfully converted all {} Endpoint nodes", nodes.size());
+                    break;
+                case "Service":
+                    log.debug("[GraphViz] Fetching Service nodes for project: {}", projectId);
+                    List<ServiceNode> services = serviceNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} Service nodes", services.size());
+                    nodes = services.stream()
+                            .map(svc -> {
+                                try {
+                                    return convertServiceToGraphNode(svc);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting Service node id={}, className={}: {}",
+                                            svc.getId(), svc.getClassName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "Method":
+                    log.debug("[GraphViz] Fetching Method nodes for project: {}", projectId);
+                    List<MethodNode> methods = methodNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} Method nodes", methods.size());
+                    nodes = methods.stream()
+                            .map(method -> {
+                                try {
+                                    return convertMethodToGraphNode(method);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting Method node id={}, name={}: {}",
+                                            method.getId(), method.getMethodName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "Repository":
+                    log.debug("[GraphViz] Fetching Repository nodes for project: {}", projectId);
+                    List<RepositoryClassNode> repositories = repositoryClassNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} Repository nodes", repositories.size());
+                    nodes = repositories.stream()
+                            .map(repo -> {
+                                try {
+                                    return convertRepositoryToGraphNode(repo);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting Repository node id={}, className={}: {}",
+                                            repo.getId(), repo.getClassName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "KafkaTopic":
+                    log.debug("[GraphViz] Fetching KafkaTopic nodes for project: {}", projectId);
+                    List<KafkaTopicNode> topics = kafkaTopicNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} KafkaTopic nodes", topics.size());
+                    nodes = topics.stream()
+                            .map(topic -> {
+                                try {
+                                    return convertKafkaTopicToGraphNode(topic);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting KafkaTopic node id={}, name={}: {}",
+                                            topic.getId(), topic.getName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "KafkaListener":
+                    log.debug("[GraphViz] Fetching KafkaListener nodes for project: {}", projectId);
+                    List<KafkaListenerNode> listeners = kafkaListenerNodeRepository.findByProjectId(projectId);
+                    log.debug("[GraphViz] Found {} KafkaListener nodes", listeners.size());
+                    nodes = listeners.stream()
+                            .map(listener -> {
+                                try {
+                                    return convertKafkaListenerToGraphNode(listener);
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting KafkaListener node id={}, className={}: {}",
+                                            listener.getId(), listener.getClassName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            })
+                            .collect(Collectors.toList());
+                    break;
+                case "DatabaseTable":
+                    log.debug("[GraphViz] Fetching DatabaseTable nodes for project: {}", projectId);
+                    List<RepositoryClassNode> reposWithTables = repositoryClassNodeRepository.findByProjectIdWithDatabaseTables(projectId);
+                    log.debug("[GraphViz] Found {} Repository nodes with tables", reposWithTables.size());
+                    for (RepositoryClassNode repo : reposWithTables) {
+                        if (repo.getAccessesTables() != null) {
+                            log.debug("[GraphViz] Processing {} tables from repository: {}",
+                                    repo.getAccessesTables().size(), repo.getClassName());
+                            for (DatabaseTableNode table : repo.getAccessesTables()) {
+                                try {
+                                    nodes.add(convertDatabaseTableToGraphNode(table));
+                                } catch (Exception e) {
+                                    log.error("[GraphViz] Error converting DatabaseTable node id={}, tableName={}: {}",
+                                            table.getId(), table.getTableName(), e.getMessage(), e);
+                                    throw e;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                default:
+                    log.warn("[GraphViz] Unknown node type requested: {}", nodeType);
+            }
 
-        return NodeListResponse.builder()
-                .nodes(nodes)
-                .nodeType(nodeType)
-                .totalCount(nodes.size())
-                .projectId(projectId)
-                .build();
+            log.info("[GraphViz] Successfully retrieved {} nodes of type {} for project {}",
+                    nodes.size(), nodeType, projectId);
+
+            return NodeListResponse.builder()
+                    .nodes(nodes)
+                    .nodeType(nodeType)
+                    .totalCount(nodes.size())
+                    .projectId(projectId)
+                    .build();
+
+        } catch (StackOverflowError soe) {
+            log.error("[GraphViz] StackOverflowError while processing nodes - project: {}, type: {}, processed: {}/{} nodes",
+                    projectId, nodeType, nodes.size(), "unknown", soe);
+            throw new RuntimeException("StackOverflowError occurred while loading " + nodeType + " nodes. " +
+                    "Likely cause: circular reference in entity relationships. Processed " + nodes.size() + " nodes before failure.", soe);
+        } catch (Exception e) {
+            log.error("[GraphViz] Error getting nodes by type - project: {}, type: {}, error: {}",
+                    projectId, nodeType, e.getMessage(), e);
+            throw new RuntimeException("Failed to get nodes of type " + nodeType + ": " + e.getMessage(), e);
+        }
     }
 
     /**
@@ -931,11 +1057,14 @@ public class GraphVisualizationService {
             }
         }
 
-        // Add external calls
+        // Add external calls and resolve their targets
         if (endpoint.getExternalCalls() != null) {
             for (ExternalCallNode extCall : endpoint.getExternalCalls()) {
                 addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
                 addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+
+                // Try to resolve the external call to an actual endpoint/service
+                resolveExternalCallTarget(extCall, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
             }
         }
 
@@ -1135,6 +1264,9 @@ public class GraphVisualizationService {
         for (ExternalCallNode extCall : externalCalls) {
             addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
             addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+
+            // Resolve external call to its target endpoint/service
+            resolveExternalCallTarget(extCall, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
         }
 
         // Load and add Kafka topics using explicit query
@@ -1185,6 +1317,9 @@ public class GraphVisualizationService {
         for (ExternalCallNode extCall : externalCalls) {
             addNodeIfNotExists(nodes, addedNodeIds, convertExternalCallToGraphNode(extCall));
             addEdgeIfNotExists(edges, addedEdgeIds, createEdge(method.getId(), extCall.getId(), "MAKES_EXTERNAL_CALL"));
+
+            // Resolve external call to its target endpoint/service
+            resolveExternalCallTarget(extCall, projectId, nodes, edges, addedNodeIds, addedEdgeIds);
         }
 
         // Load Kafka topics for this method using explicit query
@@ -1400,6 +1535,32 @@ public class GraphVisualizationService {
                 .build();
     }
 
+    /**
+     * Create an edge with canonical ID for stable cross-branch comparison.
+     */
+    private GraphEdge createEdgeWithCanonicalId(String sourceId, String targetId, String type,
+                                                 String sourceCanonicalId, String targetCanonicalId) {
+        String edgeId = sourceId + "-" + type + "-" + targetId;
+        String canonicalEdgeId = null;
+        if (sourceCanonicalId != null && targetCanonicalId != null) {
+            canonicalEdgeId = canonicalIdGenerator.generateEdgeCanonicalId(type, sourceCanonicalId, targetCanonicalId);
+        }
+
+        return GraphEdge.builder()
+                .id(edgeId)
+                .canonicalId(canonicalEdgeId)
+                .source(sourceId)
+                .target(targetId)
+                .type(type)
+                .label(type.toLowerCase().replace("_", " "))
+                .style(EdgeStyle.builder()
+                        .color(EDGE_COLORS.getOrDefault(type, "#9E9E9E"))
+                        .width(2)
+                        .arrowShape("triangle")
+                        .build())
+                .build();
+    }
+
     private GraphMetadata buildMetadata(List<GraphNode> nodes, List<GraphEdge> edges, String projectId, int depth) {
         Map<String, Integer> nodeCountByType = nodes.stream()
                 .collect(Collectors.groupingBy(GraphNode::getType, Collectors.summingInt(n -> 1)));
@@ -1429,6 +1590,7 @@ public class GraphVisualizationService {
 
         return GraphNode.builder()
                 .id(app.getId())
+                .canonicalId(app.getCanonicalId())
                 .label(app.getMainClassName() != null ? app.getMainClassName() : app.getAppKey())
                 .type("Application")
                 .group(app.getMainClassPackage())
@@ -1466,30 +1628,61 @@ public class GraphVisualizationService {
     }
 
     private GraphNode convertEndpointToGraphNode(EndpointNode endpoint) {
-        Map<String, Object> props = new HashMap<>();
-        props.put("httpMethod", endpoint.getHttpMethod());
-        props.put("path", endpoint.getPath());
-        props.put("handlerMethod", endpoint.getHandlerMethod());
-        props.put("controllerClass", endpoint.getControllerClass());
-        props.put("lineStart", endpoint.getLineStart());
-        props.put("lineEnd", endpoint.getLineEnd());
+        try {
+            log.trace("[GraphViz] convertEndpointToGraphNode - START - id={}, path={}",
+                    endpoint.getId(), endpoint.getFullPath());
 
-        String label = (endpoint.getHttpMethod() != null ? endpoint.getHttpMethod() : "?") + " " +
-                       (endpoint.getPath() != null ? endpoint.getPath() : "");
+            Map<String, Object> props = new HashMap<>();
 
-        return GraphNode.builder()
-                .id(endpoint.getId())
-                .label(label)
-                .type("Endpoint")
-                .group(endpoint.getControllerClass())
-                .properties(props)
-                .style(NodeStyle.builder()
-                        .color(NODE_COLORS.get("Endpoint"))
-                        .shape("rectangle")
-                        .size(30)
-                        .icon("endpoint")
-                        .build())
-                .build();
+            log.trace("[GraphViz] convertEndpointToGraphNode - adding httpMethod property");
+            props.put("httpMethod", endpoint.getHttpMethod());
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - adding path property");
+            props.put("path", endpoint.getPath());
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - adding handlerMethod property");
+            props.put("handlerMethod", endpoint.getHandlerMethod());
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - adding controllerClass property");
+            props.put("controllerClass", endpoint.getControllerClass());
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - adding lineStart property");
+            props.put("lineStart", endpoint.getLineStart());
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - adding lineEnd property");
+            props.put("lineEnd", endpoint.getLineEnd());
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - building label");
+            String label = (endpoint.getHttpMethod() != null ? endpoint.getHttpMethod() : "?") + " " +
+                           (endpoint.getPath() != null ? endpoint.getPath() : "");
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - building GraphNode");
+            GraphNode result = GraphNode.builder()
+                    .id(endpoint.getId())
+                    .label(label)
+                    .type("Endpoint")
+                    .group(endpoint.getControllerClass())
+                    .properties(props)
+                    .style(NodeStyle.builder()
+                            .color(NODE_COLORS.get("Endpoint"))
+                            .shape("rectangle")
+                            .size(30)
+                            .icon("endpoint")
+                            .build())
+                    .build();
+
+            log.trace("[GraphViz] convertEndpointToGraphNode - DONE - id={}", endpoint.getId());
+            return result;
+
+        } catch (StackOverflowError soe) {
+            log.error("[GraphViz] StackOverflowError in convertEndpointToGraphNode - id={}, path={}, controllerClass={}",
+                    endpoint.getId(), endpoint.getFullPath(), endpoint.getControllerClass(), soe);
+            throw soe;
+        } catch (Exception e) {
+            log.error("[GraphViz] Exception in convertEndpointToGraphNode - id={}, path={}, error: {}",
+                    endpoint.getId(), endpoint.getFullPath(), e.getMessage(), e);
+            throw e;
+        }
     }
 
     private GraphNode convertServiceToGraphNode(ServiceNode service) {
@@ -1608,5 +1801,209 @@ public class GraphVisualizationService {
                         .icon("kafka-listener")
                         .build())
                 .build();
+    }
+
+    /**
+     * Resolve a node by ID and convert it to GraphNode for explanation generation.
+     */
+    public Optional<GraphNode> getGraphNodeById(String projectId, String nodeId) {
+        Optional<ApplicationNode> appOpt = applicationNodeRepository.findById(nodeId);
+        if (appOpt.isPresent() && projectId.equals(appOpt.get().getProjectId())) {
+            return Optional.of(convertApplicationToGraphNode(appOpt.get()));
+        }
+
+        Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findById(nodeId);
+        if (ctrlOpt.isPresent() && projectId.equals(ctrlOpt.get().getProjectId())) {
+            return Optional.of(convertControllerToGraphNode(ctrlOpt.get()));
+        }
+
+        Optional<EndpointNode> endptOpt = endpointNodeRepository.findById(nodeId);
+        if (endptOpt.isPresent() && projectId.equals(endptOpt.get().getProjectId())) {
+            return Optional.of(convertEndpointToGraphNode(endptOpt.get()));
+        }
+
+        Optional<ServiceNode> svcOpt = serviceNodeRepository.findById(nodeId);
+        if (svcOpt.isPresent() && projectId.equals(svcOpt.get().getProjectId())) {
+            return Optional.of(convertServiceToGraphNode(svcOpt.get()));
+        }
+
+        Optional<MethodNode> methodOpt = methodNodeRepository.findById(nodeId);
+        if (methodOpt.isPresent() && projectId.equals(methodOpt.get().getProjectId())) {
+            return Optional.of(convertMethodToGraphNode(methodOpt.get()));
+        }
+
+        Optional<RepositoryClassNode> repoOpt = repositoryClassNodeRepository.findById(nodeId);
+        if (repoOpt.isPresent() && projectId.equals(repoOpt.get().getProjectId())) {
+            return Optional.of(convertRepositoryToGraphNode(repoOpt.get()));
+        }
+
+        Optional<KafkaTopicNode> topicOpt = kafkaTopicNodeRepository.findById(nodeId);
+        if (topicOpt.isPresent() && projectId.equals(topicOpt.get().getProjectId())) {
+            return Optional.of(convertKafkaTopicToGraphNode(topicOpt.get()));
+        }
+
+        Optional<KafkaListenerNode> listenerOpt = kafkaListenerNodeRepository.findById(nodeId);
+        if (listenerOpt.isPresent() && projectId.equals(listenerOpt.get().getProjectId())) {
+            return Optional.of(convertKafkaListenerToGraphNode(listenerOpt.get()));
+        }
+
+        return Optional.empty();
+    }
+
+    /**
+     * Attempt to resolve an external call to its actual target endpoint or service.
+     * Tries to match the external call URL/method to internal endpoints.
+     */
+    private void resolveExternalCallTarget(ExternalCallNode extCall, String projectId,
+                                           List<GraphNode> nodes, List<GraphEdge> edges,
+                                           Set<String> addedNodeIds, Set<String> addedEdgeIds) {
+        try {
+            if (extCall == null || extCall.getUrl() == null) {
+                return;
+            }
+
+            // If this external call was already resolved and points to a target endpoint, use that
+            if (extCall.isResolved()) {
+                try {
+                    // Prefer the relationship if present
+                    EndpointNode targetNode = extCall.getTargetEndpointNode();
+                    if (targetNode != null && projectId.equals(targetNode.getProjectId())) {
+                        addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(targetNode));
+                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(extCall.getId(), targetNode.getId(), "RESOLVES_TO"));
+
+                        if (targetNode.getControllerClass() != null) {
+                            Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByProjectIdAndClassName(projectId, targetNode.getControllerClass());
+                            ctrlOpt.ifPresent(ctrl -> {
+                                addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(targetNode.getId(), ctrl.getId(), "BELONGS_TO"));
+                            });
+                        }
+
+                        log.debug("[External Call Resolution] Used persisted resolution for external call {} -> {}", extCall.getId(), targetNode.getFullPath());
+                        return;
+                    }
+
+                    // Otherwise try using stored path information
+                    String resolvedPath = extCall.getTargetEndpoint();
+                    if (resolvedPath != null && !resolvedPath.isBlank()) {
+                        // normalize resolvedPath: strip host if present and ensure leading '/'
+                        String normalized = resolvedPath;
+                        if (normalized.contains("://")) {
+                            int idx = normalized.indexOf("://") + 3;
+                            int slash = normalized.indexOf('/', idx);
+                            if (slash >= 0) normalized = normalized.substring(slash);
+                            else normalized = "/";
+                        }
+                        if (!normalized.startsWith("/")) normalized = "/" + normalized;
+
+                        log.debug("[External Call Resolution] Trying persisted lookups for path='{}' (normalized='{}') method={}", resolvedPath, normalized, extCall.getHttpMethod());
+
+                        // 1) Exact fullPath match
+                        try {
+                            Optional<EndpointNode> epOpt = endpointNodeRepository.findByProjectIdAndFullPath(projectId, normalized);
+                            if (epOpt.isPresent()) {
+                                EndpointNode endpoint = epOpt.get();
+                                addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+                                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(extCall.getId(), endpoint.getId(), "RESOLVES_TO"));
+                                if (endpoint.getControllerClass() != null) {
+                                    Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByProjectIdAndClassName(projectId, endpoint.getControllerClass());
+                                    ctrlOpt.ifPresent(ctrl -> {
+                                        addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), ctrl.getId(), "BELONGS_TO"));
+                                    });
+                                }
+                                log.debug("[External Call Resolution] Matched endpoint by projectId+fullPath: {}", normalized);
+                                return;
+                            }
+                        } catch (Exception ex) {
+                            log.debug("[External Call Resolution] Error in findByProjectIdAndFullPath: {}", ex.getMessage());
+                        }
+
+                        // 2) fullPath + http method
+                        try {
+                            Optional<EndpointNode> epOpt2 = endpointNodeRepository.findByFullPathAndMethod(projectId, normalized, extCall.getHttpMethod());
+                            if (epOpt2.isPresent()) {
+                                EndpointNode endpoint = epOpt2.get();
+                                addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+                                addEdgeIfNotExists(edges, addedEdgeIds, createEdge(extCall.getId(), endpoint.getId(), "RESOLVES_TO"));
+                                if (endpoint.getControllerClass() != null) {
+                                    Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByProjectIdAndClassName(projectId, endpoint.getControllerClass());
+                                    ctrlOpt.ifPresent(ctrl -> {
+                                        addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                                        addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), ctrl.getId(), "BELONGS_TO"));
+                                    });
+                                }
+                                log.debug("[External Call Resolution] Matched endpoint by fullPath+method: {} {}", extCall.getHttpMethod(), normalized);
+                                return;
+                            }
+                        } catch (Exception ex) {
+                            log.debug("[External Call Resolution] Error in findByFullPathAndMethod: {}", ex.getMessage());
+                        }
+
+                        // 3) Try path pattern / partial match - search endpoints by project and check contains/endsWith
+                        try {
+                            List<EndpointNode> allEps = endpointNodeRepository.findByProjectId(projectId);
+                            for (EndpointNode candidate : allEps) {
+                                if (candidate.getFullPath() == null) continue;
+                                String cand = candidate.getFullPath();
+                                if (cand.equals(normalized) || cand.endsWith(normalized) || cand.contains(normalized)) {
+                                    addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(candidate));
+                                    addEdgeIfNotExists(edges, addedEdgeIds, createEdge(extCall.getId(), candidate.getId(), "RESOLVES_TO"));
+                                    if (candidate.getControllerClass() != null) {
+                                        Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByProjectIdAndClassName(projectId, candidate.getControllerClass());
+                                        ctrlOpt.ifPresent(ctrl -> {
+                                            addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                                            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(candidate.getId(), ctrl.getId(), "BELONGS_TO"));
+                                        });
+                                    }
+                                    log.debug("[External Call Resolution] Matched endpoint by partial/fullPath scan: {} -> {}", resolvedPath, candidate.getFullPath());
+                                    return;
+                                }
+                            }
+                        } catch (Exception ex) {
+                            log.debug("[External Call Resolution] Error scanning endpoints for resolvedPath: {}", ex.getMessage());
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("[External Call Resolution] Error using persisted resolution for {}: {}", extCall.getId(), e.getMessage());
+                    // fall through to dynamic matching below
+                }
+            }
+
+            // Fallback: dynamic pattern-based matching on URL path
+            // Extract path from URL (e.g., "/api/users" from "http://localhost:8080/api/users")
+            String url = extCall.getUrl();
+            String pathPattern = url;
+            if (url.contains("/")) {
+                int lastSlash = url.lastIndexOf("/");
+                pathPattern = url.substring(lastSlash);
+            }
+
+            log.debug("[External Call Resolution] Attempting to resolve dynamically: {}, path: {}", url, pathPattern);
+
+            List<EndpointNode> endpoints = endpointNodeRepository.findByProjectId(projectId);
+            for (EndpointNode endpoint : endpoints) {
+                if (endpoint.getPath() != null && endpoint.getPath().contains(pathPattern)) {
+                    addNodeIfNotExists(nodes, addedNodeIds, convertEndpointToGraphNode(endpoint));
+                    addEdgeIfNotExists(edges, addedEdgeIds, createEdge(extCall.getId(), endpoint.getId(), "RESOLVES_TO"));
+
+                    if (endpoint.getControllerClass() != null) {
+                        Optional<ControllerNode> ctrlOpt = controllerNodeRepository.findByProjectIdAndClassName(projectId, endpoint.getControllerClass());
+                        ctrlOpt.ifPresent(ctrl -> {
+                            addNodeIfNotExists(nodes, addedNodeIds, convertControllerToGraphNode(ctrl));
+                            addEdgeIfNotExists(edges, addedEdgeIds, createEdge(endpoint.getId(), ctrl.getId(), "BELONGS_TO"));
+                        });
+                    }
+
+                    log.debug("[External Call Resolution] Dynamically resolved to endpoint: {}", endpoint.getPath());
+                    return;
+                }
+            }
+
+            log.debug("[External Call Resolution] Could not resolve external call: {}", url);
+
+        } catch (Exception e) {
+            log.warn("[External Call Resolution] Error resolving external call {}: {}", extCall.getId(), e.getMessage());
+        }
     }
 }

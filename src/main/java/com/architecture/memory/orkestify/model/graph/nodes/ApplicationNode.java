@@ -26,6 +26,9 @@ public class ApplicationNode {
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
 
+    @Property("canonicalId")
+    private String canonicalId;
+
     @Property("projectId")
     private String projectId;
 

@@ -3,6 +3,7 @@ package com.architecture.memory.orkestify.model.graph.nodes;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 import org.springframework.data.neo4j.core.schema.GeneratedValue;
 import org.springframework.data.neo4j.core.schema.Id;
@@ -24,6 +25,9 @@ public class EndpointNode {
     @Id
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
+
+    @Property("canonicalId")
+    private String canonicalId;
 
     @Property("httpMethod")
     private String httpMethod;
@@ -62,14 +66,18 @@ public class EndpointNode {
     @Property("responseType")
     private String responseType;
 
+    // Exclude relationship collections from equals/hashCode to prevent circular reference
+    @EqualsAndHashCode.Exclude
     @Relationship(type = "CALLS", direction = Relationship.Direction.OUTGOING)
     @Builder.Default
     private Set<MethodNode> calls = new HashSet<>();
 
+    @EqualsAndHashCode.Exclude
     @Relationship(type = "MAKES_EXTERNAL_CALL", direction = Relationship.Direction.OUTGOING)
     @Builder.Default
     private Set<ExternalCallNode> externalCalls = new HashSet<>();
 
+    @EqualsAndHashCode.Exclude
     @Relationship(type = "PRODUCES_TO", direction = Relationship.Direction.OUTGOING)
     @Builder.Default
     private Set<KafkaTopicNode> producesToTopics = new HashSet<>();

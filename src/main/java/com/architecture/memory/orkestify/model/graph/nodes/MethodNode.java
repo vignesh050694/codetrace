@@ -27,6 +27,9 @@ public class MethodNode {
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
 
+    @Property("canonicalId")
+    private String canonicalId;
+
     @Property("methodName")
     private String methodName;
 

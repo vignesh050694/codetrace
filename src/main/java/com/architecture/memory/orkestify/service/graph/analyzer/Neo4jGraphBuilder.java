@@ -3,6 +3,7 @@ package com.architecture.memory.orkestify.service.graph.analyzer;
 import com.architecture.memory.orkestify.model.graph.nodes.*;
 import com.architecture.memory.orkestify.repository.graph.ApplicationNodeRepository;
 import com.architecture.memory.orkestify.repository.graph.KafkaTopicNodeRepository;
+import com.architecture.memory.orkestify.service.graph.CanonicalIdGenerator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -20,6 +21,7 @@ import java.util.*;
  *   3. Self-call resolution (private methods within the same service)
  *   4. Service -> Service call chains (unlimited depth with cycle detection)
  *   5. Service -> Repository calls properly resolved via field type, not declaring type
+ *   6. Canonical ID generation for stable graph identity across commits and PRs
  */
 @Service
 @RequiredArgsConstructor
@@ -28,6 +30,7 @@ public class Neo4jGraphBuilder {
 
     private final ApplicationNodeRepository applicationNodeRepository;
     private final KafkaTopicNodeRepository kafkaTopicNodeRepository;
+    private final CanonicalIdGenerator canonicalIdGenerator;
 
     /**
      * Build and persist the Neo4j graph from a parsed application.
@@ -41,17 +44,26 @@ public class Neo4jGraphBuilder {
 
         // Upsert application node
         ApplicationNode appNode = applicationNodeRepository.findByProjectIdAndAppKey(projectId, appKey)
-                .orElseGet(() -> ApplicationNode.builder()
-                        .projectId(projectId)
-                        .repoUrl(repoUrl)
-                        .appKey(appKey)
-                        .controllers(new HashSet<>())
-                        .services(new HashSet<>())
-                        .repositories(new HashSet<>())
-                        .kafkaListeners(new HashSet<>())
-                        .configurations(new HashSet<>())
-                        .isSpringBoot(true)
-                        .build());
+                .orElseGet(() -> {
+                    ApplicationNode node = ApplicationNode.builder()
+                            .projectId(projectId)
+                            .repoUrl(repoUrl)
+                            .appKey(appKey)
+                            .controllers(new HashSet<>())
+                            .services(new HashSet<>())
+                            .repositories(new HashSet<>())
+                            .kafkaListeners(new HashSet<>())
+                            .configurations(new HashSet<>())
+                            .isSpringBoot(true)
+                            .build();
+                    node.setCanonicalId(canonicalIdGenerator.generateApplicationCanonicalId(appKey));
+                    return node;
+                });
+
+        // Set canonicalId if not already set (for existing nodes)
+        if (appNode.getCanonicalId() == null) {
+            appNode.setCanonicalId(canonicalIdGenerator.generateApplicationCanonicalId(appKey));
+        }
 
         // Clear existing relationships for update
         appNode.getControllers().clear();
@@ -130,6 +142,8 @@ public class Neo4jGraphBuilder {
             RepositoryClassNode repoNode = RepositoryClassNode.builder()
                     .className(repo.getClassName())
                     .packageName(repo.getPackageName())
+                    .canonicalId(canonicalIdGenerator.generateRepositoryCanonicalId(
+                            repo.getPackageName(), repo.getClassName()))
                     .repositoryType(repo.getRepositoryType())
                     .extendsClass(repo.getExtendsClass())
                     .projectId(projectId)
@@ -144,8 +158,11 @@ public class Neo4jGraphBuilder {
             for (ParsedMethod pm : repo.getMethods()) {
                 MethodNode methodNode = MethodNode.builder()
                         .className(repo.getClassName())
+                        .packageName(repo.getPackageName())
                         .methodName(pm.getMethodName())
                         .signature(pm.getSignature())
+                        .canonicalId(canonicalIdGenerator.generateMethodCanonicalId(
+                                repo.getPackageName(), repo.getClassName(), pm.getMethodName(), pm.getSignature()))
                         .projectId(projectId)
                         .appKey(appKey)
                         .methodType("REPOSITORY_METHOD")
@@ -164,6 +181,7 @@ public class Neo4jGraphBuilder {
             if (repo.getTableName() != null) {
                 DatabaseTableNode tableNode = DatabaseTableNode.builder()
                         .tableName(repo.getTableName())
+                        .canonicalId(canonicalIdGenerator.generateDatabaseTableCanonicalId(repo.getTableName()))
                         .entityClass(repo.getEntityClassName())
                         .entitySimpleName(extractSimpleName(repo.getEntityClassName()))
                         .databaseType(repo.getDatabaseType())
@@ -192,6 +210,8 @@ public class Neo4jGraphBuilder {
             ServiceNode serviceNode = ServiceNode.builder()
                     .className(service.getClassName())
                     .packageName(service.getPackageName())
+                    .canonicalId(canonicalIdGenerator.generateServiceCanonicalId(
+                            service.getPackageName(), service.getClassName()))
                     .projectId(projectId)
                     .appKey(appKey)
                     .lineStart(service.getLineStart())
@@ -202,8 +222,11 @@ public class Neo4jGraphBuilder {
             for (ParsedMethod pm : service.getMethods()) {
                 MethodNode methodNode = MethodNode.builder()
                         .className(service.getClassName())
+                        .packageName(service.getPackageName())
                         .methodName(pm.getMethodName())
                         .signature(pm.getSignature())
+                        .canonicalId(canonicalIdGenerator.generateMethodCanonicalId(
+                                service.getPackageName(), service.getClassName(), pm.getMethodName(), pm.getSignature()))
                         .projectId(projectId)
                         .appKey(appKey)
                         .methodType("SERVICE_METHOD")
@@ -433,6 +456,8 @@ public class Neo4jGraphBuilder {
             ControllerNode controllerNode = ControllerNode.builder()
                     .className(controller.getClassName())
                     .packageName(controller.getPackageName())
+                    .canonicalId(canonicalIdGenerator.generateControllerCanonicalId(
+                            controller.getPackageName(), controller.getClassName()))
                     .baseUrl(controller.getBaseUrl())
                     .projectId(projectId)
                     .appKey(appKey)
@@ -448,6 +473,8 @@ public class Neo4jGraphBuilder {
                         .httpMethod(pm.getHttpMethod())
                         .path(pm.getPath())
                         .fullPath(pm.getPath())
+                        .canonicalId(canonicalIdGenerator.generateEndpointCanonicalId(
+                                pm.getHttpMethod(), pm.getPath()))
                         .handlerMethod(pm.getMethodName())
                         .signature(pm.getSignature())
                         .projectId(projectId)
@@ -617,6 +644,8 @@ public class Neo4jGraphBuilder {
                 .clientType(ext.getClientType())
                 .httpMethod(ext.getHttpMethod())
                 .url(ext.getUrl())
+                .canonicalId(canonicalIdGenerator.generateExternalCallCanonicalId(
+                        ext.getHttpMethod(), ext.getUrl(), false))
                 .targetClass(ext.getTargetClass())
                 .targetMethod(ext.getTargetMethod())
                 .projectId(projectId)
@@ -633,11 +662,15 @@ public class Neo4jGraphBuilder {
         }
         final String finalTopicName = topicName;
         return kafkaTopicNodeRepository.findByProjectIdAndName(projectId, finalTopicName)
-                .orElseGet(() -> KafkaTopicNode.builder()
-                        .name(finalTopicName)
-                        .projectId(projectId)
-                        .appKey(appKey)
-                        .build());
+                .orElseGet(() -> {
+                    KafkaTopicNode node = KafkaTopicNode.builder()
+                            .name(finalTopicName)
+                            .projectId(projectId)
+                            .appKey(appKey)
+                            .build();
+                    node.setCanonicalId(canonicalIdGenerator.generateKafkaTopicCanonicalId(finalTopicName));
+                    return node;
+                });
     }
 
     private void indexMethod(Map<String, MethodNode> index, MethodNode methodNode, String qualifiedClassName) {

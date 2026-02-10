@@ -53,4 +53,9 @@ public interface EndpointNodeRepository extends Neo4jRepository<EndpointNode, St
     List<EndpointNode> findByControllerClass(String controllerClass);
 
     List<EndpointNode> findByAppKey(String appKey);
+
+    // Create relationship from endpoint to external call
+    @Query("MATCH (e:Endpoint {id: $endpointId}), (ec:ExternalCall {id: $externalCallId}) " +
+           "MERGE (e)-[:MAKES_EXTERNAL_CALL]->(ec) RETURN e")
+    void createMakesExternalCallRel(String endpointId, String externalCallId);
 }

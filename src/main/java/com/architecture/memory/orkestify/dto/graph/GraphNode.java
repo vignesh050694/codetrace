@@ -17,7 +17,8 @@ import java.util.Map;
 @AllArgsConstructor
 public class GraphNode {
 
-    private String id;
+    private String id;              // UUID for internal use
+    private String canonicalId;     // Stable, deterministic ID for cross-branch comparison
     private String label;
     private String type;        // Controller, Service, Endpoint, Method, KafkaTopic, etc.
     private String group;       // For clustering in visualization (e.g., package name, app name)

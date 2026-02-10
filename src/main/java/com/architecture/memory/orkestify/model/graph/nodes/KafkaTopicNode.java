@@ -24,6 +24,9 @@ public class KafkaTopicNode {
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
 
+    @Property("canonicalId")
+    private String canonicalId;
+
     @Property("name")
     private String name;
 

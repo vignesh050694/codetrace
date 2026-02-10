@@ -72,6 +72,25 @@ public class WebhookPayload {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Base {
         private String ref;  // Base branch name (e.g., "main")
+        private String sha;  // Base commit SHA
+
+        @JsonProperty("repo")
+        private BaseRepo repo;
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class BaseRepo {
+        @JsonProperty("clone_url")
+        private String cloneUrl;
+
+        @JsonProperty("full_name")
+        private String fullName;
+
+        @JsonProperty("default_branch")
+        private String defaultBranch;
     }
 
     @Data

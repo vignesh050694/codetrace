@@ -25,6 +25,9 @@ public class ControllerNode {
     @GeneratedValue(generatorClass = UUIDStringGenerator.class)
     private String id;
 
+    @Property("canonicalId")
+    private String canonicalId;
+
     @Property("className")
     private String className;
 
