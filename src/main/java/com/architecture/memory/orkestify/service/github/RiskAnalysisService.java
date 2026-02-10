@@ -70,10 +70,14 @@ public class RiskAnalysisService {
         int score = 0;
 
         // CRITICAL: API URL changes in service clients (service-to-service communication)
-        // This is the MOST CRITICAL type of breaking change
+        // This is the MOST CRITICAL type of breaking change - BREAKS relationships
         if (!report.getApiUrlChanges().isEmpty()) {
-            // Each API URL change is worth 15 points (can max out the 40 with just 3 changes)
-            score += Math.min(report.getApiUrlChanges().size() * 15, 35); // Up to 35 points
+            // Each API URL change is worth 25 points - this should nearly max out breaking changes
+            // Because it BREAKS the graph relationship even if diff doesn't show it
+            score += Math.min(report.getApiUrlChanges().size() * 25, 40); // Up to 40 points
+
+            log.warn("CRITICAL: {} API URL changes detected - service integration WILL break",
+                    report.getApiUrlChanges().size());
         }
 
         // Controllers modified/removed (likely API changes)
@@ -100,6 +104,14 @@ public class RiskAnalysisService {
      */
     private int calculateDownstreamImpactScore(ImpactReport report) {
         int score = 0;
+
+        // API URL changes break downstream relationships - CRITICAL impact
+        // Even if graph diff doesn't show it, we know the relationship is broken
+        if (!report.getApiUrlChanges().isEmpty()) {
+            // Each URL change potentially breaks 1+ downstream services
+            // Assume at least 1 service per URL change is affected
+            score += Math.min(report.getApiUrlChanges().size() * 10, 20); // Up to 20 points
+        }
 
         // Affected endpoints
         int endpointCount = report.getAffectedEndpoints().size();
@@ -201,8 +213,17 @@ public class RiskAnalysisService {
             factors.add(RiskFactor.builder()
                     .severity(RiskFactor.Severity.HIGH)
                     .description("Service-to-service API endpoint URLs changed (" +
-                            report.getApiUrlChanges().size() + " change(s)) - WILL break integration")
+                            report.getApiUrlChanges().size() + " change(s)) - WILL break integration and graph relationships")
                     .build());
+
+            // Check for graph diff inconsistency
+            boolean graphDiffInconsistent = detectGraphDiffInconsistency(report);
+            if (graphDiffInconsistent) {
+                factors.add(RiskFactor.builder()
+                        .severity(RiskFactor.Severity.HIGH)
+                        .description("Graph relationship broken but not detected in diff - manual verification required")
+                        .build());
+            }
         }
 
         if (breakdown.getBreakingChanges() >= 20) {
@@ -333,6 +354,15 @@ public class RiskAnalysisService {
      * Determine deployment strategy based on risk
      */
     private DeploymentStrategy determineDeploymentStrategy(ImpactReport report, RiskLevel riskLevel) {
+        // CRITICAL: API URL changes require coordinated deployment
+        if (!report.getApiUrlChanges().isEmpty()) {
+            return DeploymentStrategy.builder()
+                    .recommendation("HALT - Coordinated deployment across all affected services required")
+                    .featureFlagRequired(true)
+                    .reasoning("Service-to-service API URLs changed - will break integration if not coordinated")
+                    .build();
+        }
+
         boolean requiresFeatureFlag = riskLevel == RiskLevel.CRITICAL ||
                 (riskLevel == RiskLevel.HIGH && report.getAffectedEndpoints().size() >= 5);
 
@@ -378,6 +408,11 @@ public class RiskAnalysisService {
             return "⛔ Blocked - Circular dependency errors must be resolved";
         }
 
+        // CRITICAL: API URL changes should block merge without coordination
+        if (!report.getApiUrlChanges().isEmpty()) {
+            return "🚨 BLOCKED - Service integration will break - requires immediate coordination with affected teams";
+        }
+
         if (riskLevel == RiskLevel.CRITICAL) {
             return "⚠️ Requires architectural review and careful planning";
         }
@@ -391,6 +426,31 @@ public class RiskAnalysisService {
         }
 
         return "✅ Low risk - ready to merge after review";
+    }
+
+    /**
+     * Detect if there's an inconsistency between detected API URL changes and graph diff
+     * If URL changes exist but graph diff shows 0 removed nodes/relationships, this is suspicious
+     */
+    private boolean detectGraphDiffInconsistency(ImpactReport report) {
+        if (report.getApiUrlChanges().isEmpty()) {
+            return false;
+        }
+
+        // API URL changes should result in relationship changes in the graph
+        // If we have URL changes but diff shows no removals, it's inconsistent
+        if (report.getDiffSummary() != null) {
+            int nodesRemoved = report.getDiffSummary().getNodesRemoved();
+            int relationshipsRemoved = report.getDiffSummary().getRelationshipsRemoved();
+
+            if (nodesRemoved == 0 && relationshipsRemoved == 0) {
+                log.warn("Graph diff inconsistency detected: {} API URL changes but 0 nodes/relationships removed",
+                        report.getApiUrlChanges().size());
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
