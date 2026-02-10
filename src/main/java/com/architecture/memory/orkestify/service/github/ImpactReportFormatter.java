@@ -4,6 +4,9 @@ import com.architecture.memory.orkestify.dto.github.ImpactReport;
 import com.architecture.memory.orkestify.dto.github.ImpactReport.AffectedEndpoint;
 import com.architecture.memory.orkestify.dto.github.ImpactReport.AffectedFlow;
 import com.architecture.memory.orkestify.dto.github.ImpactReport.ChangedComponent;
+import com.architecture.memory.orkestify.dto.github.RiskAssessment;
+import com.architecture.memory.orkestify.dto.github.RiskAssessment.RiskFactor;
+import com.architecture.memory.orkestify.dto.github.RiskAssessment.RecommendedAction;
 import com.architecture.memory.orkestify.dto.graph.CircularDependency;
 import com.architecture.memory.orkestify.dto.graph.DiffSummary;
 import org.springframework.stereotype.Component;
@@ -19,10 +22,15 @@ public class ImpactReportFormatter {
     /**
      * Format the full impact report as a GitHub PR comment in Markdown.
      */
-    public String format(ImpactReport report) {
+    public String format(ImpactReport report, RiskAssessment riskAssessment) {
         StringBuilder md = new StringBuilder();
 
         md.append("## \uD83C\uDFD7\uFE0F Architecture Impact Report\n\n");
+
+        // Risk Assessment section (at the top)
+        if (riskAssessment != null) {
+            appendRiskAssessment(md, riskAssessment);
+        }
 
         // Summary section
         appendSummary(md, report);
@@ -89,6 +97,109 @@ public class ImpactReportFormatter {
     }
 
     // ========================= SECTION FORMATTERS =========================
+
+    private void appendRiskAssessment(StringBuilder md, RiskAssessment assessment) {
+        md.append("## 🎯 Risk Assessment\n\n");
+
+        // Overall Risk header
+        md.append("**Overall Risk: ").append(assessment.getOverallRiskLevel().getLabel()).append("** ");
+        md.append(assessment.getOverallRiskLevel().getEmoji()).append("  \n");
+        md.append("**Risk Score: ").append(assessment.getOverallScore()).append("/100**\n\n");
+
+        // Score Breakdown
+        md.append("### Score Breakdown\n");
+        RiskAssessment.ScoreBreakdown breakdown = assessment.getScoreBreakdown();
+        md.append("- 🔴 Breaking Changes: ").append(breakdown.getBreakingChanges()).append("/40");
+        md.append(breakdown.getBreakingChanges() >= 20 ? " (High impact)" : "").append("\n");
+        md.append("- 🟡 Downstream Impact: ").append(breakdown.getDownstreamImpact()).append("/30");
+        md.append(breakdown.getDownstreamImpact() >= 15 ? " (Significant)" : "").append("\n");
+        md.append("- 🟢 Service Criticality: ").append(breakdown.getServiceCriticality()).append("/20");
+        md.append(breakdown.getServiceCriticality() >= 12 ? " (Critical services)" : "").append("\n");
+        md.append("- 🟢 Change Complexity: ").append(breakdown.getChangeComplexity()).append("/10");
+        md.append(breakdown.getChangeComplexity() >= 7 ? " (Complex)" : "").append("\n\n");
+
+        md.append("---\n\n");
+
+        // Key Risk Factors
+        if (!assessment.getRiskFactors().isEmpty()) {
+            md.append("### ⚠️ Key Risk Factors\n\n");
+
+            // Group by severity
+            List<RiskFactor> highSeverity = assessment.getRiskFactors().stream()
+                    .filter(f -> f.getSeverity() == RiskFactor.Severity.HIGH)
+                    .toList();
+            List<RiskFactor> mediumSeverity = assessment.getRiskFactors().stream()
+                    .filter(f -> f.getSeverity() == RiskFactor.Severity.MEDIUM)
+                    .toList();
+            List<RiskFactor> lowSeverity = assessment.getRiskFactors().stream()
+                    .filter(f -> f.getSeverity() == RiskFactor.Severity.LOW)
+                    .toList();
+
+            if (!highSeverity.isEmpty()) {
+                md.append("**HIGH SEVERITY**\n");
+                for (RiskFactor factor : highSeverity) {
+                    md.append("- ").append(factor.getDescription()).append("\n");
+                }
+                md.append("\n");
+            }
+
+            if (!mediumSeverity.isEmpty()) {
+                md.append("**MEDIUM SEVERITY**\n");
+                for (RiskFactor factor : mediumSeverity) {
+                    md.append("- ").append(factor.getDescription()).append("\n");
+                }
+                md.append("\n");
+            }
+
+            if (!lowSeverity.isEmpty()) {
+                md.append("**LOW SEVERITY**\n");
+                for (RiskFactor factor : lowSeverity) {
+                    md.append("- ").append(factor.getDescription()).append("\n");
+                }
+                md.append("\n");
+            }
+
+            md.append("---\n\n");
+        }
+
+        // Recommended Actions
+        if (!assessment.getRecommendedActions().isEmpty()) {
+            md.append("### ✅ Recommended Actions\n\n");
+
+            List<RecommendedAction> beforeMerging = assessment.getRecommendedActions().stream()
+                    .filter(a -> a.getCategory() == RecommendedAction.Category.BEFORE_MERGING)
+                    .toList();
+
+            if (!beforeMerging.isEmpty()) {
+                md.append("**Before Merging:**\n");
+                for (RecommendedAction action : beforeMerging) {
+                    md.append("- [ ] ").append(action.getDescription()).append("\n");
+                }
+                md.append("\n");
+            }
+        }
+
+        // Deployment Strategy
+        if (assessment.getDeploymentStrategy() != null) {
+            RiskAssessment.DeploymentStrategy strategy = assessment.getDeploymentStrategy();
+            md.append("**Deployment Strategy:**\n");
+            md.append("- ").append(strategy.getRecommendation()).append("\n");
+            if (strategy.isFeatureFlagRequired()) {
+                md.append("- Feature flag: **Required**\n");
+            } else {
+                md.append("- Feature flag: Not required\n");
+            }
+            if (strategy.getReasoning() != null) {
+                md.append("- Reasoning: ").append(strategy.getReasoning()).append("\n");
+            }
+            md.append("\n");
+        }
+
+        // Merge Status
+        md.append("**Merge Status:** ").append(assessment.getMergeStatus()).append("\n");
+
+        md.append("---\n\n");
+    }
 
     private void appendSummary(StringBuilder md, ImpactReport report) {
         long architectureComponents = report.getChangedComponents().stream()
