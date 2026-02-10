@@ -2,6 +2,7 @@ package com.architecture.memory.orkestify.service.github;
 
 import com.architecture.memory.orkestify.dto.github.ImpactReport;
 import com.architecture.memory.orkestify.dto.github.PullRequestFile;
+import com.architecture.memory.orkestify.dto.github.RiskAssessment;
 import com.architecture.memory.orkestify.dto.github.WebhookPayload;
 import com.architecture.memory.orkestify.dto.graph.CreateShadowGraphRequest;
 import com.architecture.memory.orkestify.dto.graph.ShadowGraphResponse;
@@ -28,7 +29,8 @@ import java.util.Optional;
  * 4. Trigger shadow graph creation
  * 5. Poll for completion
  * 6. Run impact analysis
- * 7. Format and post/update the impact report comment
+ * 7. Perform risk assessment
+ * 8. Format and post/update the impact report comment with risk assessment
  */
 @Service
 @RequiredArgsConstructor
@@ -41,6 +43,7 @@ public class PRAnalysisService {
     private final ShadowGraphService shadowGraphService;
     private final GitHubWebhookService gitHubWebhookService;
     private final ImpactAnalysisService impactAnalysisService;
+    private final RiskAnalysisService riskAnalysisService;
     private final ImpactReportFormatter reportFormatter;
 
     private static final int MAX_POLL_ATTEMPTS = 120;   // 120 * 5s = 10 minutes max
@@ -136,8 +139,13 @@ public class PRAnalysisService {
             report.setPrNumber(prNumber);
             report.setPrUrl(payload.getPullRequest().getHtmlUrl());
 
-            // Step 7: Format and post the report
-            String reportComment = reportFormatter.format(report);
+            // Step 7: Perform risk assessment
+            RiskAssessment riskAssessment = riskAnalysisService.assessRisk(report);
+            log.info("Risk assessment for PR #{}: {} (score: {})",
+                    prNumber, riskAssessment.getOverallRiskLevel(), riskAssessment.getOverallScore());
+
+            // Step 8: Format and post the report with risk assessment
+            String reportComment = reportFormatter.format(report, riskAssessment);
             gitHubWebhookService.postOrUpdateComment(owner, repo, prNumber, reportComment, accessToken);
 
             log.info("Successfully posted impact report for {}/{} #{}", owner, repo, prNumber);
