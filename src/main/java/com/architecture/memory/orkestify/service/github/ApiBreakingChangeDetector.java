@@ -187,14 +187,21 @@ public class ApiBreakingChangeDetector {
             return ChangeType.PATH_STRUCTURE_CHANGE;
         }
 
-        // Path parameter change
+        // Check how many segments differ
+        int differingSegments = 0;
         for (int i = 0; i < oldSegments.length; i++) {
             if (!oldSegments[i].equals(newSegments[i])) {
-                return ChangeType.PATH_SEGMENT_CHANGE;
+                differingSegments++;
             }
         }
 
-        return ChangeType.MINOR_CHANGE;
+        if (differingSegments == 0) {
+            return ChangeType.MINOR_CHANGE;
+        } else if (differingSegments == 1 && differingSegments < oldSegments.length - 1) {
+            return ChangeType.PATH_SEGMENT_CHANGE;
+        } else {
+            return ChangeType.PATH_STRUCTURE_CHANGE;
+        }
     }
 
     /**
@@ -228,6 +235,19 @@ public class ApiBreakingChangeDetector {
                 case COMPLETE_REWRITE, PATH_STRUCTURE_CHANGE -> Severity.HIGH;
                 case PATH_SEGMENT_CHANGE -> Severity.HIGH;
                 case MINOR_CHANGE -> Severity.MEDIUM;
+            };
+        }
+
+        /**
+         * Get the breaking changes points for this URL change
+         * Used for risk scoring
+         */
+        public int getBreakingChangesPoints() {
+            return switch (changeType) {
+                case COMPLETE_REWRITE -> 35;        // Complete URL rewrite
+                case PATH_STRUCTURE_CHANGE -> 30;   // Structure changed (segments added/removed)
+                case PATH_SEGMENT_CHANGE -> 25;     // Individual segment changed
+                case MINOR_CHANGE -> 15;            // Minor modification
             };
         }
     }

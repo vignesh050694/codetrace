@@ -40,6 +40,11 @@ public class ImpactReportFormatter {
             appendApiUrlChanges(md, report.getApiUrlChanges());
         }
 
+        // API URL Change Details (WHO/WHAT/HOW)
+        if (!report.getApiUrlChangeDetails().isEmpty()) {
+            appendApiUrlChangeDetails(md, report.getApiUrlChangeDetails());
+        }
+
         // Changed components
         if (!report.getChangedComponents().isEmpty()) {
             appendChangedComponents(md, report.getChangedComponents());
@@ -218,12 +223,16 @@ public class ImpactReportFormatter {
         md.append("| Metric | Count |\n");
         md.append("|--------|-------|\n");
         md.append("| Architecture components changed | ").append(architectureComponents).append(" |\n");
-        md.append("| Endpoints affected | ").append(report.getAffectedEndpoints().size()).append(" |\n");
+        md.append("| Endpoints affected (in this service) | ").append(report.getAffectedEndpoints().size()).append(" |\n");
         md.append("| Request flows affected | ").append(report.getAffectedFlows().size()).append(" |\n");
         md.append("| New circular dependencies | ").append(report.getNewCircularDependencies().size()).append(" |\n");
 
         if (!report.getApiUrlChanges().isEmpty()) {
+            int totalConsumers = report.getApiUrlChangeDetails().stream()
+                    .mapToInt(detail -> detail.getConsumers() != null ? detail.getConsumers().size() : 0)
+                    .sum();
             md.append("| ⚠️ **API URL changes** | **").append(report.getApiUrlChanges().size()).append("** |\n");
+            md.append("| ⚠️ **Downstream consumers affected** | **").append(totalConsumers).append("** |\n");
         }
 
         if (otherFiles > 0) {
@@ -235,7 +244,7 @@ public class ImpactReportFormatter {
 
     private void appendApiUrlChanges(StringBuilder md, List<String> apiUrlChanges) {
         md.append("### 🚨 CRITICAL: API URL Changes Detected\n\n");
-        md.append("> **WARNING:** The following service-to-service API endpoint URLs have been changed. ");
+        md.append("> **WARNING:** Service-to-service API endpoint URLs have been changed. ");
         md.append("This **WILL BREAK** communication between services unless coordinated across all consumers.\n\n");
 
         for (String change : apiUrlChanges) {
@@ -244,9 +253,52 @@ public class ImpactReportFormatter {
 
         md.append("\n**Required Actions:**\n");
         md.append("1. ✋ **STOP** - Do not merge without coordination\n");
-        md.append("2. Identify all services consuming these endpoints\n");
+        md.append("2. Review consumer list below\n");
         md.append("3. Update consumers OR revert these URL changes\n");
         md.append("4. Deploy changes in coordinated manner\n\n");
+    }
+
+    private void appendApiUrlChangeDetails(StringBuilder md, List<ImpactReport.ApiUrlChangeDetail> details) {
+        md.append("### 📋 API URL Change Impact Analysis\n\n");
+
+        for (ImpactReport.ApiUrlChangeDetail detail : details) {
+            md.append("#### ").append(detail.getClassName()).append("\n\n");
+
+            // WHAT changed
+            md.append("**WHAT Changed:**\n");
+            md.append("- Old URL: `").append(detail.getOldUrl()).append("`\n");
+            md.append("- New URL: `").append(detail.getNewUrl()).append("`\n");
+            md.append("- Change Type: ").append(detail.getChangeType()).append("\n");
+            md.append("- Breaking Score: ").append(detail.getBreakingChangesPoints()).append("/40 points\n\n");
+
+            // WHO is affected
+            md.append("**WHO is Affected:**\n");
+            if (detail.getConsumers() != null && !detail.getConsumers().isEmpty()) {
+                md.append("⚠️ **").append(detail.getConsumers().size()).append(" downstream consumer(s) detected:**\n");
+                for (String consumer : detail.getConsumers()) {
+                    md.append("- `").append(consumer).append("` will get 404 errors when calling old URL\n");
+                }
+            } else {
+                md.append("⚠️ **No consumers detected** - This may indicate:\n");
+                md.append("- Dead code (endpoint never called)\n");
+                md.append("- External service call (not in current graph)\n");
+                md.append("- Graph analysis limitation\n");
+            }
+            md.append("\n");
+
+            // HOW to fix
+            md.append("**HOW to Fix:**\n");
+            if (detail.getConsumers() != null && !detail.getConsumers().isEmpty()) {
+                md.append("- **Option 1 (Recommended):** Revert this URL change to `").append(detail.getOldUrl()).append("`\n");
+                md.append("- **Option 2:** Update all consumer services listed above to use `").append(detail.getNewUrl()).append("`\n");
+                md.append("- **Option 3:** Support both URLs temporarily (add endpoint alias at target service)\n");
+            } else {
+                md.append("- Verify this endpoint is actually used (may be dead code)\n");
+                md.append("- Check logs for calls to `").append(detail.getOldUrl()).append("`\n");
+                md.append("- If unused, safe to change; if used externally, coordinate with external teams\n");
+            }
+            md.append("\n\n");
+        }
     }
 
     private void appendChangedComponents(StringBuilder md, List<ChangedComponent> components) {

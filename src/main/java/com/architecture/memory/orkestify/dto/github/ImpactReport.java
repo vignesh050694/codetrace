@@ -45,6 +45,25 @@ public class ImpactReport {
     @Builder.Default
     private List<String> apiUrlChanges = new ArrayList<>();
 
+    @Builder.Default
+    private List<ApiUrlChangeDetail> apiUrlChangeDetails = new ArrayList<>();
+
+    /**
+     * Detailed information about an API URL change
+     */
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ApiUrlChangeDetail {
+        private String className;
+        private String oldUrl;
+        private String newUrl;
+        private String changeType;
+        private int breakingChangesPoints;
+        private List<String> consumers;  // Services/components that call this URL
+    }
+
     /**
      * A component (controller, service, repository) directly changed in the PR.
      */
