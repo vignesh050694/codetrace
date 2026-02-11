@@ -13,8 +13,10 @@ import com.architecture.memory.orkestify.repository.GitHubTokenRepository;
 import com.architecture.memory.orkestify.repository.ProjectRepository;
 import com.architecture.memory.orkestify.repository.ShadowGraphRepository;
 import com.architecture.memory.orkestify.service.graph.ShadowGraphService;
+import com.architecture.memory.orkestify.service.llm.LlmReportGenerator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -45,6 +47,10 @@ public class PRAnalysisService {
     private final ImpactAnalysisService impactAnalysisService;
     private final RiskAnalysisService riskAnalysisService;
     private final ImpactReportFormatter reportFormatter;
+    private final LlmReportGenerator llmReportGenerator;
+
+    @Value("${orkestify.report.use-llm:false}")
+    private boolean useLlmReports;
 
     private static final int MAX_POLL_ATTEMPTS = 120;   // 120 * 5s = 10 minutes max
     private static final int POLL_INTERVAL_MS = 5000;
@@ -139,13 +145,20 @@ public class PRAnalysisService {
             report.setPrNumber(prNumber);
             report.setPrUrl(payload.getPullRequest().getHtmlUrl());
 
-            // Step 7: Perform risk assessment
-            RiskAssessment riskAssessment = riskAnalysisService.assessRisk(report);
-            log.info("Risk assessment for PR #{}: {} (score: {})",
-                    prNumber, riskAssessment.getOverallRiskLevel(), riskAssessment.getOverallScore());
+            // Step 7: Generate the report (LLM or static)
+            String reportComment;
+            if (useLlmReports) {
+                log.info("Generating LLM-based report for PR #{}", prNumber);
+                reportComment = llmReportGenerator.generatePrAnalysisReport(report);
+            } else {
+                log.info("Generating static report for PR #{}", prNumber);
+                RiskAssessment riskAssessment = riskAnalysisService.assessRisk(report);
+                log.info("Risk assessment for PR #{}: {} (score: {})",
+                        prNumber, riskAssessment.getOverallRiskLevel(), riskAssessment.getOverallScore());
+                reportComment = reportFormatter.format(report, riskAssessment);
+            }
 
-            // Step 8: Format and post the report with risk assessment
-            String reportComment = reportFormatter.format(report, riskAssessment);
+            // Step 8: Post the report
             gitHubWebhookService.postOrUpdateComment(owner, repo, prNumber, reportComment, accessToken);
 
             log.info("Successfully posted impact report for {}/{} #{}", owner, repo, prNumber);

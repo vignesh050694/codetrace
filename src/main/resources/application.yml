@@ -39,6 +39,12 @@ github:
 cors:
   allowed-origins: "http://localhost:3000,https://product2.app"
 
+# Orkestify Configuration
+orkestify:
+  report:
+    # Use LLM to generate PR analysis reports (true) or use static template (false)
+    use-llm: ${USE_LLM_REPORTS:false}
+
 # OpenAI Configuration for Graph RAG
 openai:
   api-key: ${OPENAI_API_KEY}
